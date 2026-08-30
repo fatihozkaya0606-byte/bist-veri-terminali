@@ -1,143 +1,132 @@
-from flask import Flask, jsonify, render_template_string, request
-import requests, time, json, os, threading
-from datetime import datetime
+from flask import Flask, jsonify, render_template_string
+import requests
+import threading
+import time
+import os
+import websocket
+import json
+import random
+import string
 
 app = Flask(__name__)
 
 TV_URL = "https://scanner.tradingview.com/turkey/scan"
 
 HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Linux; Android) AppleWebKit/537.36 Chrome/140 Mobile Safari/537.36",
+    "User-Agent": "Mozilla/5.0",
     "Content-Type": "application/json",
     "Origin": "https://www.tradingview.com",
-    "Referer": "https://www.tradingview.com/",
+    "Referer": "https://www.tradingview.com/"
 }
 
-BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
-CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()
+CACHE = {
+    "stocks": [],
+    "updated": 0
+}
 
-STATE_FILE = os.path.expanduser("~/borsa/sent_signals.json")
+LIVE_CACHE = {}
+LIVE_LOCK = threading.Lock()
 
-SCAN_INTERVAL = 15 * 60
-MIN_SCORE = 110
-MAX_TELEGRAM = 8
-COOLDOWN = 3 * 60 * 60
+COLUMNS = [
+    "name",
+    "description",
+    "close",
+    "change",
+    "volume",
+    "relative_volume_10d_calc",
+    "RSI",
+    "MACD.macd",
+    "MACD.signal",
+    "EMA20",
+    "EMA50",
+    "SMA20",
+    "Recommend.All",
+    "market_cap_basic"
+]
 
-_cache = {"ts": 0, "stocks": [], "error": None}
-_lock = threading.Lock()
 
-
-def fnum(x, default=0.0):
-    try:
-        return float(x) if x is not None else default
-    except Exception:
-        return default
-
-
-def score_stock(price, change, relvol, rsi, macd, macdsig, ema20, ema50, sma20, rec):
+def puanla(s):
     score = 0
-    reasons = []
 
-    if 55 <= rsi <= 70:
-        score += 30
-        reasons.append("RSI güçlü bölgede")
-    elif 50 <= rsi < 55:
-        score += 18
-        reasons.append("RSI toparlanıyor")
-    elif 70 < rsi <= 75:
-        score += 8
-        reasons.append("RSI yüksek")
+    rsi = s.get("rsi")
+    rv = s.get("relative_volume")
+    price = s.get("price")
+    ema20 = s.get("ema20")
+    ema50 = s.get("ema50")
+    sma20 = s.get("sma20")
+    macd = s.get("macd")
+    macd_signal = s.get("macd_signal")
+    rec = s.get("recommend")
+    change = s.get("change")
 
-    if relvol >= 2:
-        score += 30
-        reasons.append("Göreli hacim 2x+")
-    elif relvol >= 1.5:
-        score += 25
-        reasons.append("Göreli hacim 1.5x+")
-    elif relvol >= 1.2:
-        score += 12
-        reasons.append("Hacim artıyor")
+    if rsi is not None:
+        if 55 <= rsi <= 70:
+            score += 30
+        elif 50 <= rsi < 55:
+            score += 18
+        elif 70 < rsi <= 75:
+            score += 8
 
-    if price > ema20 > ema50 > 0:
-        score += 25
-        reasons.append("EMA trend güçlü")
-    elif price > ema20 > 0:
-        score += 12
-        reasons.append("EMA20 üzerinde")
+    if rv is not None:
+        if rv >= 2:
+            score += 30
+        elif rv >= 1.5:
+            score += 25
+        elif rv >= 1.2:
+            score += 12
 
-    if macd > macdsig:
+    if price and ema20 and ema50:
+        if price > ema20 > ema50:
+            score += 25
+        elif price > ema20:
+            score += 12
+
+    if macd is not None and macd_signal is not None and macd > macd_signal:
         score += 20
-        reasons.append("MACD pozitif")
 
-    if rec >= 0.5:
-        score += 20
-        reasons.append("Teknik güç yüksek")
-    elif rec >= 0.2:
+    if rec is not None:
+        if rec >= 0.5:
+            score += 20
+        elif rec >= 0.2:
+            score += 10
+
+    if change is not None:
+        if 0.5 <= change <= 6:
+            score += 15
+        elif 0 < change < 0.5:
+            score += 7
+        elif 6 < change < 9.9:
+            score += 8
+
+    if price and sma20 and price > sma20:
         score += 10
-        reasons.append("Teknik görünüm pozitif")
 
-    if 0.5 <= change <= 6:
-        score += 15
-        reasons.append("Momentum güçlü")
-    elif 0 < change < 0.5:
-        score += 7
-    elif 6 < change <= 9.9:
-        score += 8
-        reasons.append("Hızlı yükseliş")
+    return min(score, 150)
 
-    if sma20 > 0 and price > sma20:
-        score += 10
-        reasons.append("SMA20 üzerinde")
 
-    score = min(int(score), 150)
-
+def sinyal_adi(score):
     if score >= 120:
-        signal, emoji = "ÇOK GÜÇLÜ", "🚀"
-    elif score >= 110:
-        signal, emoji = "GÜÇLÜ", "🔥"
-    elif score >= 90:
-        signal, emoji = "İZLE", "👀"
-    elif score >= 70:
-        signal, emoji = "ORTA", "⚡"
-    else:
-        signal, emoji = "ZAYIF", "➖"
-
-    return score, signal, emoji, reasons
+        return "ÇOK GÜÇLÜ"
+    if score >= 110:
+        return "GÜÇLÜ"
+    if score >= 90:
+        return "İZLE"
+    if score >= 70:
+        return "ORTA"
+    return "ZAYIF"
 
 
-def fetch_bist():
+def fetch_market():
     payload = {
         "filter": [
-            {"left": "exchange", "operation": "equal", "right": "BIST"},
-            {"left": "type", "operation": "equal", "right": "stock"},
+            {"left": "exchange", "operation": "equal", "right": "BIST"}
         ],
         "options": {"lang": "tr"},
         "markets": ["turkey"],
-        "symbols": {
-            "query": {"types": []},
-            "tickers": []
-        },
-        "columns": [
-            "name",
-            "description",
-            "close",
-            "change",
-            "volume",
-            "relative_volume_10d_calc",
-            "RSI",
-            "MACD.macd",
-            "MACD.signal",
-            "EMA20",
-            "EMA50",
-            "SMA20",
-            "Recommend.All",
-            "market_cap_basic"
-        ],
-        "sort": {
-            "sortBy": "volume",
-            "sortOrder": "desc"
-        },
-        "range": [0, 1000]
+        "symbols": {"query": {"types": []}, "tickers": []},
+        "columns": COLUMNS,
+        "sort": {"sortBy": "volume", "sortOrder": "desc"},
+        "range": [0, 9999]
     }
 
     r = requests.post(
@@ -146,1521 +135,1693 @@ def fetch_bist():
         json=payload,
         timeout=30
     )
-
     r.raise_for_status()
 
-    data = r.json().get("data", [])
+    raw = r.json()
+    stocks = []
 
-    out = []
+    for row in raw.get("data", []):
+        d = row.get("d", [])
 
-    for item in data:
-        d = item.get("d", [])
-        sym = item.get("s", "").replace("BIST:", "")
-
-        if not sym or len(d) < 14:
+        if len(d) < len(COLUMNS):
             continue
 
-        name = d[1] or sym
+        stock = {
+            "symbol": d[0],
+            "description": d[1] or "",
+            "price": d[2],
+            "change": d[3],
+            "volume": d[4],
+            "relative_volume": d[5],
+            "rsi": d[6],
+            "macd": d[7],
+            "macd_signal": d[8],
+            "ema20": d[9],
+            "ema50": d[10],
+            "sma20": d[11],
+            "recommend": d[12],
+            "market_cap": d[13]
+        }
 
-        price = fnum(d[2])
-        change = fnum(d[3])
-        volume = fnum(d[4])
-        relvol = fnum(d[5])
-        rsi = fnum(d[6])
-        macd = fnum(d[7])
-        macdsig = fnum(d[8])
-        ema20 = fnum(d[9])
-        ema50 = fnum(d[10])
-        sma20 = fnum(d[11])
-        rec = fnum(d[12])
-        mcap = fnum(d[13])
+        stock["score"] = puanla(stock)
+        stock["signal"] = sinyal_adi(stock["score"])
 
-        if price <= 0:
-            continue
+        stocks.append(stock)
 
-        score, signal, emoji, reasons = score_stock(
-            price,
-            change,
-            relvol,
-            rsi,
-            macd,
-            macdsig,
-            ema20,
-            ema50,
-            sma20,
-            rec
-        )
+    CACHE["stocks"] = stocks
+    CACHE["updated"] = int(time.time())
 
-        out.append({
-            "symbol": sym,
-            "name": str(name),
-            "price": round(price, 2),
-            "change": round(change, 2),
-            "volume": int(volume),
-            "relative_volume": round(relvol, 2),
-            "rsi": round(rsi, 1),
-            "macd": round(macd, 3),
-            "ema20": round(ema20, 2),
-            "ema50": round(ema50, 2),
-            "recommend": round(rec, 2),
-            "market_cap": mcap,
-            "score": score,
-            "signal": signal,
-            "emoji": emoji,
-            "reasons": reasons,
-        })
+    return stocks
 
-    out.sort(
-        key=lambda x: x["score"],
-        reverse=True
+
+def get_market():
+    if not CACHE["stocks"] or time.time() - CACHE["updated"] > 60:
+        try:
+            return fetch_market()
+        except Exception as e:
+            print("Veri hatası:", e)
+
+    return CACHE["stocks"]
+
+
+def tv_sid(prefix):
+    return prefix + "_" + "".join(
+        random.choice(string.ascii_lowercase) for _ in range(12)
     )
 
-    return out
+
+def tv_frame(method, params):
+    body = json.dumps(
+        {"m": method, "p": params},
+        separators=(",", ":")
+    )
+    return f"~m~{len(body)}~m~{body}"
 
 
-def state_load():
+def fetch_live_quote(symbol, wait_seconds=4):
+    symbol = symbol.upper().strip()
+    full_symbol = f"BIST:{symbol}"
+
+    qs = tv_sid("qs")
+
+    ws = None
+
     try:
-        with open(STATE_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except Exception:
-        return {}
-
-
-def state_save(s):
-    os.makedirs(
-        os.path.dirname(STATE_FILE),
-        exist_ok=True
-    )
-
-    with open(
-        STATE_FILE,
-        "w",
-        encoding="utf-8"
-    ) as f:
-        json.dump(
-            s,
-            f,
-            ensure_ascii=False,
-            indent=2
+        ws = websocket.create_connection(
+            "wss://data.tradingview.com/socket.io/websocket",
+            origin="https://data.tradingview.com",
+            timeout=5
         )
 
+        ws.send(tv_frame(
+            "set_auth_token",
+            ["unauthorized_user_token"]
+        ))
 
-def telegram_send(stock):
-    if not BOT_TOKEN or not CHAT_ID:
-        return False
+        ws.send(tv_frame(
+            "quote_create_session",
+            [qs]
+        ))
 
-    text = "\n".join([
-        "🚨 BIST RADAR SİNYALİ",
-        "",
-        f"📈 {stock['symbol']}",
-        f"💰 Fiyat: {stock['price']:.2f} TL",
-        f"📊 Değişim: {stock['change']:+.2f}%",
-        f"🧠 Teknik Skor: {stock['score']}/150",
-        f"RSI: {stock['rsi']}",
-        f"🔥 Göreli Hacim: {stock['relative_volume']}x",
-        "",
-        *[
-            f"✅ {r}"
-            for r in stock.get("reasons", [])[:6]
-        ],
-        "",
-        f"{stock['emoji']} {stock['signal']}",
-        "",
-        "⚠️ Teknik taramadır, yatırım tavsiyesi değildir."
-    ])
+        ws.send(tv_frame(
+            "quote_set_fields",
+            [
+                qs,
+                "short_name",
+                "description",
+                "lp",
+                "bid",
+                "ask",
+                "bid_size",
+                "ask_size",
+                "ch",
+                "chp",
+                "volume"
+            ]
+        ))
 
-    url = (
-        f"https://api.telegram.org/bot"
-        f"{BOT_TOKEN}/sendMessage"
-    )
+        ws.send(tv_frame(
+            "quote_add_symbols",
+            [qs, full_symbol]
+        ))
 
-    r = requests.post(
-        url,
-        data={
-            "chat_id": CHAT_ID,
-            "text": text
-        },
-        timeout=15
-    )
+        result = {
+            "symbol": symbol,
+            "last": None,
+            "bid": None,
+            "ask": None,
+            "bid_size": None,
+            "ask_size": None,
+            "change_percent": None,
+            "volume": None,
+            "updated": int(time.time())
+        }
 
-    return r.ok
+        end = time.time() + wait_seconds
 
+        while time.time() < end:
+            try:
+                raw = ws.recv()
 
-def send_new_signals(stocks):
-    now = time.time()
-    state = state_load()
-    sent = []
+                if "~h~" in raw:
+                    ws.send(raw)
+                    continue
 
-    candidates = [
-        x
-        for x in stocks
-        if x["score"] >= MIN_SCORE
-    ][:MAX_TELEGRAM]
+                parts = raw.split("~m~")
 
-    for s in candidates:
-        old = state.get(
-            s["symbol"],
-            {}
-        )
+                for part in parts:
+                    part = part.strip()
 
-        last_t = fnum(
-            old.get("time")
-        )
+                    if not part.startswith("{"):
+                        continue
 
-        last_score = fnum(
-            old.get("score")
-        )
+                    try:
+                        j = json.loads(part)
+                    except:
+                        continue
 
-        last_price = fnum(
-            old.get("price")
-        )
+                    if j.get("m") != "qsd":
+                        continue
 
-        due = (
-            now - last_t
-            >= COOLDOWN
-        )
+                    pp = j.get("p", [])
 
-        stronger = (
-            s["score"]
-            >= last_score + 10
-        )
+                    if len(pp) < 2:
+                        continue
 
-        moved = (
-            last_price > 0
-            and abs(
-                (
-                    s["price"]
-                    / last_price
-                    - 1
-                )
-                * 100
-            )
-            >= 2
-        )
+                    obj = pp[1]
+                    v = obj.get("v", {})
 
-        if (
-            s["symbol"] not in state
-            or due
-            or stronger
-            or moved
-        ):
-            if telegram_send(s):
-                state[s["symbol"]] = {
-                    "time": now,
-                    "score": s["score"],
-                    "price": s["price"]
-                }
+                    if v.get("lp") is not None:
+                        result["last"] = v.get("lp")
 
-                sent.append(
-                    s["symbol"]
-                )
+                    if v.get("bid") is not None:
+                        result["bid"] = v.get("bid")
 
-                time.sleep(0.3)
+                    if v.get("ask") is not None:
+                        result["ask"] = v.get("ask")
 
-    state_save(state)
+                    if v.get("bid_size") is not None:
+                        result["bid_size"] = v.get("bid_size")
 
-    return sent
+                    if v.get("ask_size") is not None:
+                        result["ask_size"] = v.get("ask_size")
 
+                    if v.get("chp") is not None:
+                        result["change_percent"] = v.get("chp")
 
-def refresh_cache(send_tg=False):
-    stocks = fetch_bist()
+                    if v.get("volume") is not None:
+                        result["volume"] = v.get("volume")
 
-    sent = (
-        send_new_signals(stocks)
-        if send_tg
-        else []
-    )
+                    if result["bid"] is not None and result["ask"] is not None:
+                        with LIVE_LOCK:
+                            LIVE_CACHE[symbol] = result
 
-    with _lock:
-        _cache["ts"] = time.time()
-        _cache["stocks"] = stocks
-        _cache["error"] = None
+                        return result
 
-    return stocks, sent
+            except websocket.WebSocketTimeoutException:
+                continue
 
+        with LIVE_LOCK:
+            old = LIVE_CACHE.get(symbol, {})
+
+            for k, v in old.items():
+                if result.get(k) is None:
+                    result[k] = v
+
+            LIVE_CACHE[symbol] = result
+
+        return result
+
+    except Exception as e:
+        print("Canlı veri hatası:", symbol, e)
+
+        with LIVE_LOCK:
+            return LIVE_CACHE.get(symbol, {
+                "symbol": symbol,
+                "last": None,
+                "bid": None,
+                "ask": None,
+                "bid_size": None,
+                "ask_size": None,
+                "change_percent": None,
+                "volume": None,
+                "updated": int(time.time())
+            })
+
+    finally:
+        if ws:
+            try:
+                ws.close()
+            except:
+                pass
 
 def background_loop():
     while True:
         try:
-            now = datetime.now()
-
-            weekday = now.weekday()
-
-            minutes = (
-                now.hour * 60
-                + now.minute
-            )
-
-            in_session = (
-                weekday < 5
-                and 600 <= minutes <= 1090
-            )
-
-            if in_session:
-                refresh_cache(
-                    send_tg=True
-                )
-
+            fetch_market()
+            print("BIST verileri güncellendi:", len(CACHE["stocks"]))
         except Exception as e:
-            print(
-                "Otomatik tarama hatası:",
-                e
-            )
+            print("Arka plan veri hatası:", e)
 
-        time.sleep(
-            SCAN_INTERVAL
-        )
+        time.sleep(60)
 
 
-HTML = """
+@app.route("/api/market")
+def api_market():
+    return jsonify({
+        "ok": True,
+        "count": len(get_market()),
+        "stocks": get_market(),
+        "updated": CACHE["updated"]
+    })
+
+
+@app.route("/api/stock/<symbol>")
+def api_stock(symbol):
+    symbol = symbol.upper().strip()
+
+    for s in get_market():
+        if s["symbol"].upper() == symbol:
+            return jsonify({
+                "ok": True,
+                "stock": s,
+                "realtime_depth": False,
+                "real_akd": False,
+                "real_takas": False
+            })
+
+    return jsonify({
+        "ok": False,
+        "error": "Hisse bulunamadı"
+    }), 404
+
+
+HTML = r'''
 <!doctype html>
-
 <html lang="tr">
-
 <head>
-
 <meta charset="utf-8">
+<meta name="viewport"
+content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
 
-<meta
-name="viewport"
-content="width=device-width,initial-scale=1,maximum-scale=1"
->
+<title>BIST Veri Terminali</title>
 
-<title>BIST Radar AI</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
 
 <style>
-
 *{
-box-sizing:border-box;
+    box-sizing:border-box
 }
 
 body{
-margin:0;
-background:#080b11;
-color:#f3f5f8;
-font-family:Arial,sans-serif;
-padding-bottom:82px;
+    margin:0;
+    background:#070b12;
+    color:#eef3ff;
+    font-family:Arial,Helvetica,sans-serif;
 }
 
-.header{
-position:sticky;
-top:0;
-z-index:10;
-padding:16px;
-background:#0d1119;
-border-bottom:1px solid #202633;
+.app{
+    max-width:900px;
+    margin:auto;
+    padding-bottom:85px;
 }
 
-.brand{
-font-size:22px;
-font-weight:900;
-}
-
-.sub{
-font-size:12px;
-color:#8c96a5;
-margin-top:4px;
-}
-
-.container{
-padding:12px;
-}
-
-.cards{
-display:flex;
-gap:9px;
-overflow:auto;
-}
-
-.card{
-min-width:142px;
-background:#121722;
-border:1px solid #252c39;
-border-radius:18px;
-padding:14px;
-}
-
-.lbl{
-font-size:12px;
-color:#98a2b1;
-}
-
-.num{
-font-size:22px;
-font-weight:900;
-margin-top:7px;
-}
-
-.green{
-color:#22d69b;
-}
-
-.red{
-color:#ff5572;
-}
-
-.blue{
-color:#73a3ff;
-}
-
-.search{
-display:flex;
-align-items:center;
-background:#121722;
-border:1px solid #252c39;
-border-radius:18px;
-padding:0 12px;
-margin-top:12px;
-}
-
-.search input{
-width:100%;
-padding:14px 8px;
-border:0;
-outline:0;
-background:none;
-color:white;
-font-size:16px;
-}
-
-.tabs{
-display:flex;
-gap:7px;
-overflow:auto;
-margin-top:12px;
-}
-
-.tab{
-border:1px solid #29313f;
-background:#11161f;
-color:#aab3c0;
-border-radius:20px;
-padding:10px 15px;
-white-space:nowrap;
-font-weight:700;
-}
-
-.tab.active{
-background:#397cf0;
-color:#fff;
-}
-
-.grid{
-display:grid;
-grid-template-columns:repeat(3,1fr);
-gap:8px;
-margin-top:14px;
-}
-
-.box{
-background:#121722;
-border:1px solid #252c39;
-border-radius:16px;
-padding:13px;
-text-align:center;
-}
-
-.box .n{
-font-size:20px;
-font-weight:900;
-}
-
-.box .t{
-font-size:11px;
-color:#98a2b1;
-margin-top:4px;
-}
-
-.actions{
-display:flex;
-gap:8px;
-margin-top:12px;
-}
-
-.btn{
-flex:1;
-border:0;
-border-radius:14px;
-padding:13px;
-font-weight:800;
-color:#fff;
-background:#397cf0;
-}
-
-.btn.tg{
-background:#1b3149;
+.top{
+    position:sticky;
+    top:0;
+    z-index:20;
+    background:rgba(7,11,18,.96);
+    backdrop-filter:blur(12px);
+    padding:15px;
+    border-bottom:1px solid #182131;
 }
 
 .title{
-font-size:13px;
-color:#9fa9b7;
-font-weight:800;
-margin:16px 0 10px;
+    font-size:22px;
+    font-weight:800;
+}
+
+.sub{
+    margin-top:4px;
+    color:#8290a8;
+    font-size:12px;
+}
+
+.search{
+    width:100%;
+    border:none;
+    outline:none;
+    margin-top:13px;
+    padding:14px 16px;
+    border-radius:14px;
+    background:#111925;
+    color:white;
+    font-size:16px;
+}
+
+.stats{
+    display:grid;
+    grid-template-columns:repeat(3,1fr);
+    gap:8px;
+    padding:12px 14px 5px;
+}
+
+.stat{
+    background:#0e1520;
+    border:1px solid #1a2433;
+    border-radius:13px;
+    padding:11px;
+}
+
+.stat b{
+    display:block;
+    font-size:18px;
+}
+
+.stat span{
+    color:#8190aa;
+    font-size:11px;
+}
+
+.tabs{
+    display:flex;
+    overflow:auto;
+    gap:8px;
+    padding:10px 14px;
+}
+
+.tabs button{
+    white-space:nowrap;
+    background:#101824;
+    color:#9aa8bd;
+    border:1px solid #1c2838;
+    padding:9px 13px;
+    border-radius:12px;
+}
+
+.tabs button.active{
+    background:#1769ff;
+    color:white;
+    border-color:#1769ff;
+}
+
+.list{
+    padding:5px 12px;
 }
 
 .stock{
-background:#121722;
-border:1px solid #242b37;
-border-radius:16px;
-padding:13px;
-margin-bottom:8px;
+    padding:14px;
+    margin:8px 0;
+    background:#0d141e;
+    border:1px solid #192434;
+    border-radius:15px;
+    cursor:pointer;
 }
 
-.row{
-display:flex;
-justify-content:space-between;
-gap:10px;
-align-items:center;
+.stockTop{
+    display:flex;
+    justify-content:space-between;
+    gap:10px;
 }
 
-.sym{
-font-size:17px;
-font-weight:900;
+.symbol{
+    font-weight:800;
+    font-size:17px;
 }
 
-.name{
-font-size:11px;
-color:#8d98a8;
-margin-top:3px;
-max-width:200px;
-overflow:hidden;
-text-overflow:ellipsis;
-white-space:nowrap;
+.desc{
+    color:#8190a5;
+    font-size:12px;
+    margin-top:3px;
 }
 
 .price{
-text-align:right;
-font-weight:900;
+    font-weight:800;
+    text-align:right;
 }
 
-.chg{
-text-align:right;
-font-size:13px;
-font-weight:800;
-margin-top:3px;
+.green{color:#29d391}
+.red{color:#ff5c6c}
+
+.smallgrid{
+    display:grid;
+    grid-template-columns:repeat(4,1fr);
+    gap:6px;
+    margin-top:12px;
 }
 
-.metrics{
-display:grid;
-grid-template-columns:repeat(4,1fr);
-gap:6px;
-margin-top:10px;
+.small{
+    background:#111a26;
+    padding:8px;
+    border-radius:9px;
+    text-align:center;
 }
 
-.m{
-background:#0c1017;
-border-radius:10px;
-padding:7px 3px;
-text-align:center;
+.small span{
+    color:#78869a;
+    display:block;
+    font-size:10px;
 }
 
-.mv{
-font-size:13px;
-font-weight:800;
+.small b{
+    font-size:12px;
 }
 
-.ml{
-font-size:9px;
-color:#7f8998;
-margin-top:3px;
+.detail{
+    display:none;
+    min-height:100vh;
+    background:#070b12;
 }
 
-.sigrow{
-display:flex;
-justify-content:space-between;
-align-items:center;
-margin-top:10px;
+.detailHeader{
+    padding:15px;
+    border-bottom:1px solid #192333;
 }
 
-.sig{
-font-size:11px;
-padding:6px 8px;
-border-radius:8px;
-background:#202633;
+.back{
+    background:#111a27;
+    color:#fff;
+    border:0;
+    padding:10px 14px;
+    border-radius:10px;
 }
 
-.strong{
-color:#27dfa3;
-background:#123226;
+.hero{
+    padding:20px 15px;
 }
 
-.watch{
-color:#ffd064;
-background:#332b16;
+.heroSymbol{
+    font-size:26px;
+    font-weight:900;
+}
+
+.heroName{
+    color:#8190a8;
+    margin-top:4px;
+}
+
+.heroPrice{
+    font-size:31px;
+    font-weight:900;
+    margin-top:16px;
+}
+
+.detailTabs{
+    display:flex;
+    gap:7px;
+    overflow:auto;
+    padding:8px 13px 15px;
+}
+
+.detailTabs button{
+    border:0;
+    background:#111a27;
+    color:#91a0b6;
+    padding:10px 13px;
+    border-radius:11px;
+    white-space:nowrap;
+}
+
+.detailTabs button.active{
+    background:#1d6cff;
+    color:white;
+}
+
+.panel{
+    padding:4px 13px 30px;
+}
+
+.card{
+    background:#0e1621;
+    border:1px solid #1a2636;
+    border-radius:15px;
+    padding:14px;
+    margin-bottom:11px;
+}
+
+.card h3{
+    margin:0 0 12px;
+}
+
+.rows{
+    display:grid;
+    grid-template-columns:1fr 1fr;
+    gap:8px;
+}
+
+.row{
+    background:#111b28;
+    padding:11px;
+    border-radius:11px;
+}
+
+.row span{
+    color:#8190a5;
+    display:block;
+    font-size:11px;
+}
+
+.row b{
+    font-size:14px;
+}
+
+.warning{
+    padding:14px;
+    background:#241d0b;
+    border:1px solid #4c3b10;
+    border-radius:13px;
+    color:#f5ca61;
+    line-height:1.5;
 }
 
 .score{
-font-size:16px;
-font-weight:900;
+    font-size:45px;
+    font-weight:900;
 }
 
-.reason{
-font-size:10px;
-color:#8d98a8;
-line-height:1.5;
-margin-top:8px;
+.bar{
+    height:8px;
+    background:#192333;
+    border-radius:20px;
+    overflow:hidden;
+    margin-top:9px;
 }
 
-.fav{
-border:0;
-background:none;
-font-size:20px;
-color:#6e7888;
-}
-
-.fav.on{
-color:#ffc84b;
+.bar div{
+    height:100%;
+    background:#2774ff;
 }
 
 .loading{
-text-align:center;
-color:#9aa5b5;
-padding:30px;
+    text-align:center;
+    padding:50px;
+    color:#8190a5;
 }
 
 .bottom{
-position:fixed;
-bottom:0;
-left:0;
-right:0;
-height:70px;
-background:#0d1119;
-border-top:1px solid #252c39;
-display:flex;
-justify-content:space-around;
+    position:fixed;
+    left:0;
+    right:0;
+    bottom:0;
+    background:#0c121c;
+    border-top:1px solid #1b2635;
+    padding:11px;
+    text-align:center;
+    font-size:12px;
+    color:#77859b;
 }
 
-.nav{
-border:0;
-background:none;
-color:#7e8897;
-font-size:11px;
+/* ===== V3 PROFESSIONAL TERMINAL ===== */
+
+.detail{
+    background:#080b10;
 }
 
-.nav span{
-display:block;
-font-size:21px;
-margin-bottom:3px;
+.detailHeader{
+    background:#090d13;
+    padding:14px 16px;
+    border-bottom:1px solid #171d27;
 }
 
-.nav.active{
-color:#73a3ff;
+.back{
+    font-weight:700;
+    font-size:15px;
+    background:#101722;
+}
+
+.hero{
+    background:
+      linear-gradient(110deg,rgba(90,16,43,.62),rgba(21,12,24,.80));
+    border-bottom:3px solid #cf294e;
+    padding:18px 20px 16px;
+}
+
+.heroSymbol{
+    font-size:27px;
+    letter-spacing:.4px;
+}
+
+.heroName{
+    color:#898b99;
+    font-size:14px;
+}
+
+.heroPrice{
+    font-size:36px;
+    margin-top:14px;
+}
+
+.proTabs{
+    background:#0b0f15;
+    border-bottom:1px solid #1a202a;
+    padding:0;
+    gap:0;
+}
+
+.proTabs button{
+    border-radius:0;
+    background:#0b0f15;
+    padding:15px 17px;
+    font-weight:700;
+    font-size:13px;
+}
+
+.proTabs button.active{
+    background:#191936;
+    color:#7d78ff;
+    border-bottom:2px solid #6861ff;
+}
+
+.marketStrip{
+    display:grid;
+    grid-template-columns:repeat(5,1fr);
+    background:#121720;
+    border:1px solid #1e2530;
+    border-radius:16px;
+    overflow:hidden;
+    margin-bottom:10px;
+}
+
+.marketStrip div{
+    padding:10px 4px;
+    text-align:center;
+    border-right:1px solid #202632;
+}
+
+.marketStrip div:last-child{
+    border-right:0;
+}
+
+.marketStrip span{
+    display:block;
+    color:#737887;
+    font-size:10px;
+    font-weight:700;
+}
+
+.marketStrip b{
+    font-size:13px;
+}
+
+.depthCard{
+    background:#090c11;
+    border:1px solid #20242c;
+    border-radius:16px;
+    overflow:hidden;
+}
+
+.depthHead,
+.depthRow{
+    display:grid;
+    grid-template-columns:.55fr 1.15fr 1fr 1fr 1.15fr .55fr;
+    align-items:center;
+}
+
+.depthHead{
+    padding:9px 6px;
+    color:#757986;
+    font-size:11px;
+    font-weight:700;
+    border-bottom:1px solid #20242c;
+}
+
+.depthRow{
+    position:relative;
+    min-height:45px;
+    border-bottom:1px solid #171b22;
+    font-size:15px;
+}
+
+.depthRow > div{
+    z-index:2;
+    padding:8px 5px;
+}
+
+.depthBid{
+    color:#19d8a0;
+}
+
+.depthAsk{
+    color:#ff5367;
+}
+
+.depthBuyBg{
+    position:absolute;
+    left:0;
+    top:0;
+    bottom:0;
+    background:rgba(14,165,132,.16);
+    z-index:1;
+}
+
+.depthSellBg{
+    position:absolute;
+    right:0;
+    top:0;
+    bottom:0;
+    background:rgba(229,45,71,.13);
+    z-index:1;
+}
+
+.depthBalance{
+    padding:13px;
+}
+
+.balanceBar{
+    display:flex;
+    height:8px;
+    gap:3px;
+    margin-bottom:9px;
+}
+
+.balanceBuy{
+    background:#16c997;
+    border-radius:6px 0 0 6px;
+}
+
+.balanceSell{
+    background:#ec324d;
+    border-radius:0 6px 6px 0;
+}
+
+.balanceText{
+    display:flex;
+    justify-content:space-between;
+    font-weight:800;
+}
+
+.balanceText .buy{
+    color:#25d9a8;
+}
+
+.balanceText .sell{
+    color:#ff5367;
+}
+
+.sectionTitle{
+    font-size:15px;
+    font-weight:800;
+    color:#9297a4;
+    margin:15px 3px 8px;
+}
+
+.tradeTable{
+    width:100%;
+    border-collapse:collapse;
+    background:#090c11;
+    border-radius:14px;
+    overflow:hidden;
+}
+
+.tradeTable th{
+    color:#747987;
+    font-size:10px;
+    padding:9px 5px;
+    border-bottom:1px solid #20242c;
+}
+
+.tradeTable td{
+    padding:9px 5px;
+    border-bottom:1px solid #161a20;
+    font-size:12px;
+}
+
+.locked{
+    padding:18px;
+    background:#10151d;
+    border:1px dashed #353d49;
+    border-radius:15px;
+    color:#9aa0ad;
+    line-height:1.6;
+}
+
+.signalBox{
+    background:#101722;
+    border:1px solid #202c3a;
+    border-radius:15px;
+    padding:16px;
+    margin-bottom:10px;
+}
+
+.signalBig{
+    font-size:42px;
+    font-weight:900;
 }
 
 </style>
-
 </head>
 
 <body>
 
-<div class="header">
+<div class="app">
 
-<div class="brand">
-🧠 BIST RADAR AI
-</div>
+<div id="home">
 
-<div class="sub">
-Tüm BIST • teknik skor • Telegram sinyal
-</div>
-
-</div>
-
-<div class="container">
-
-<div class="cards">
-
-<div class="card">
-<div class="lbl">
-Taranan
-</div>
-<div
-id="total"
-class="num"
->
--
-</div>
-</div>
-
-<div class="card">
-<div class="lbl">
-Yükselen
-</div>
-<div
-id="up"
-class="num green"
->
--
-</div>
-</div>
-
-<div class="card">
-<div class="lbl">
-Güçlü Sinyal
-</div>
-<div
-id="strong"
-class="num blue"
->
--
-</div>
-</div>
-
-</div>
-
-<div class="search">
-
-🔎
+<div class="top">
+<div class="title">BIST Veri Terminali</div>
+<div class="sub">Piyasa • Teknik • Sinyal • AKD • Takas • AI</div>
 
 <input
-id="q"
-placeholder="Sembol ara... THYAO, GARAN..."
-oninput="render()"
->
+id="search"
+class="search"
+placeholder="🔎 Hisse ara: ASELS, THYAO, TUPRS..."
+oninput="renderStocks()">
+</div>
 
+<div class="stats">
+<div class="stat">
+<b id="total">-</b>
+<span>Taranan</span>
+</div>
+
+<div class="stat">
+<b id="up">-</b>
+<span>Yükselen</span>
+</div>
+
+<div class="stat">
+<b id="strong">-</b>
+<span>Güçlü Sinyal</span>
+</div>
 </div>
 
 <div class="tabs">
-
-<button
-class="tab active"
-onclick="setMode('all',this)"
->
-Ana Sayfa
-</button>
-
-<button
-class="tab"
-onclick="setMode('up',this)"
->
-📈 Yükselen
-</button>
-
-<button
-class="tab"
-onclick="setMode('down',this)"
->
-📉 Düşen
-</button>
-
-<button
-class="tab"
-onclick="setMode('volume',this)"
->
-📊 Hacim
-</button>
-
-<button
-class="tab"
-onclick="setMode('signal',this)"
->
-🧠 Sinyaller
-</button>
-
+<button class="active" onclick="setFilter('all',this)">Tüm BIST</button>
+<button onclick="setFilter('strong',this)">Güçlü</button>
+<button onclick="setFilter('up',this)">Yükselen</button>
+<button onclick="setFilter('down',this)">Düşen</button>
+<button onclick="setFilter('volume',this)">Hacim</button>
 </div>
 
-<div class="grid">
-
-<div class="box">
-<div
-id="u2"
-class="n green"
->
--
-</div>
-<div class="t">
-Yükselen
-</div>
-</div>
-
-<div class="box">
-<div
-id="d2"
-class="n red"
->
--
-</div>
-<div class="t">
-Düşen
-</div>
-</div>
-
-<div class="box">
-<div
-id="f2"
-class="n"
->
--
-</div>
-<div class="t">
-Nötr
-</div>
+<div id="list" class="list">
+<div class="loading">BIST verileri yükleniyor...</div>
 </div>
 
 </div>
 
-<div class="actions">
 
-<button
-class="btn"
-onclick="load(false)"
->
-🔄 Piyasayı Tara
-</button>
+<div id="detail" class="detail">
 
-<button
-class="btn tg"
-onclick="load(true)"
->
-📨 Tara + Telegram
-</button>
-
+<div class="detailHeader">
+<button class="back" onclick="closeDetail()">← Geri</button>
 </div>
 
-<div
-id="listTitle"
-class="title"
->
-BIST HİSSELERİ
+<div class="hero">
+<div class="heroSymbol" id="dSymbol"></div>
+<div class="heroName" id="dName"></div>
+<div class="heroPrice" id="dPrice"></div>
+<div id="dChange"></div>
 </div>
 
-<div
-id="list"
-class="loading"
->
-Piyasa verileri yükleniyor...
+<div class="detailTabs proTabs">
+<button class="active" onclick="detailTab('summary',this)">ÖZET</button>
+<button onclick="detailTab('depth',this)">DERİNLİK</button>
+<button onclick="detailTab('akd',this)">AKD</button>
+<button onclick="detailTab('kademe',this)">KADEME</button>
+<button onclick="detailTab('takas',this)">TAKAS</button>
+<button onclick="detailTab('signals',this)">SİNYALLER</button>
+</div>
+
+<div id="panel" class="panel"></div>
+
 </div>
 
 </div>
 
 <div class="bottom">
-
-<button
-class="nav active"
-onclick="nav('all',this)"
->
-<span>🏠</span>
-Piyasa
-</button>
-
-<button
-class="nav"
-onclick="nav('signal',this)"
->
-<span>🔔</span>
-Sinyaller
-</button>
-
-<button
-class="nav"
-onclick="nav('volume',this)"
->
-<span>🧭</span>
-Keşfet
-</button>
-
-<button
-class="nav"
-onclick="favNav(this)"
->
-<span>⭐</span>
-Favoriler
-</button>
-
-<button
-class="nav"
-onclick="nav('up',this)"
->
-<span>📚</span>
-Listeler
-</button>
-
+Veriler analiz amaçlıdır • Yatırım tavsiyesi değildir
 </div>
 
 <script>
 
-let stocks = [];
+let allStocks = []
+let selected = null
+let filter = "all"
 
-let mode = "all";
+if(window.Telegram && Telegram.WebApp){
+    Telegram.WebApp.ready()
+    Telegram.WebApp.expand()
+}
 
-let favs =
-JSON.parse(
-localStorage.getItem(
-"bistFavs"
-) || "[]"
-);
+function n(v,d=2){
+    if(v===null || v===undefined) return "-"
+    return Number(v).toLocaleString("tr-TR",{
+        maximumFractionDigits:d
+    })
+}
 
+function money(v){
+    if(v===null || v===undefined) return "-"
+    const x=Number(v)
+    if(x>=1e9) return "₺"+(x/1e9).toFixed(2)+" Mr"
+    if(x>=1e6) return "₺"+(x/1e6).toFixed(1)+" Mn"
+    return "₺"+n(x,0)
+}
 
-function esc(s){
+async function load(){
+    try{
+        const r=await fetch("/api/market")
+        const j=await r.json()
 
-return String(
-s ?? ""
-)
-.replaceAll("&","&amp;")
-.replaceAll("<","&lt;")
-.replaceAll(">","&gt;");
+        allStocks=j.stocks || []
 
+        document.getElementById("total").textContent=allStocks.length
+
+        document.getElementById("up").textContent=
+            allStocks.filter(x=>(x.change||0)>0).length
+
+        document.getElementById("strong").textContent=
+            allStocks.filter(x=>x.score>=110).length
+
+        renderStocks()
+    }catch(e){
+        document.getElementById("list").innerHTML=
+            '<div class="warning">Veriler alınamadı. Biraz sonra yeniden deneyin.</div>'
+    }
+}
+
+function setFilter(f,el){
+    filter=f
+
+    document.querySelectorAll(".tabs button")
+        .forEach(b=>b.classList.remove("active"))
+
+    el.classList.add("active")
+    renderStocks()
+}
+
+function renderStocks(){
+    let q=document.getElementById("search").value
+        .trim()
+        .toUpperCase()
+
+    let arr=[...allStocks]
+
+    if(q){
+        arr=arr.filter(x=>
+            (x.symbol||"").toUpperCase().includes(q) ||
+            (x.description||"").toUpperCase().includes(q)
+        )
+    }
+
+    if(filter==="strong")
+        arr=arr.filter(x=>x.score>=110)
+
+    if(filter==="up")
+        arr=arr.filter(x=>(x.change||0)>0)
+
+    if(filter==="down")
+        arr=arr.filter(x=>(x.change||0)<0)
+
+    if(filter==="volume")
+        arr.sort((a,b)=>(b.relative_volume||0)-(a.relative_volume||0))
+
+    if(!q && filter==="all")
+        arr=arr.slice(0,150)
+
+    const list=document.getElementById("list")
+
+    if(!arr.length){
+        list.innerHTML='<div class="loading">Hisse bulunamadı.</div>'
+        return
+    }
+
+    list.innerHTML=arr.map(s=>{
+
+        let cls=(s.change||0)>=0 ? "green":"red"
+
+        return `
+        <div class="stock" onclick='openDetail(${JSON.stringify(s.symbol)})'>
+
+        <div class="stockTop">
+
+        <div>
+        <div class="symbol">${s.symbol}</div>
+        <div class="desc">${s.description||""}</div>
+        </div>
+
+        <div>
+        <div class="price">₺${n(s.price)}</div>
+        <div class="${cls}">%${n(s.change)}</div>
+        </div>
+
+        </div>
+
+        <div class="smallgrid">
+
+        <div class="small">
+        <span>RSI</span>
+        <b>${n(s.rsi,1)}</b>
+        </div>
+
+        <div class="small">
+        <span>Rel. Hacim</span>
+        <b>${n(s.relative_volume,2)}x</b>
+        </div>
+
+        <div class="small">
+        <span>Skor</span>
+        <b>${s.score}/150</b>
+        </div>
+
+        <div class="small">
+        <span>Sinyal</span>
+        <b>${s.signal}</b>
+        </div>
+
+        </div>
+
+        </div>
+        `
+    }).join("")
+}
+
+async function openDetail(symbol){
+
+    const r=await fetch("/api/stock/"+symbol)
+    const j=await r.json()
+
+    if(!j.ok) return
+
+    selected=j.stock
+
+    document.getElementById("home").style.display="none"
+    document.getElementById("detail").style.display="block"
+
+    document.getElementById("dSymbol").textContent=selected.symbol
+    document.getElementById("dName").textContent=selected.description||""
+    document.getElementById("dPrice").textContent="₺"+n(selected.price)
+
+    const ch=document.getElementById("dChange")
+    ch.textContent="%"+n(selected.change)
+
+    ch.className=(selected.change||0)>=0?"green":"red"
+
+    detailTab(
+        "summary",
+        document.querySelector(".detailTabs button")
+    )
+
+    window.scrollTo(0,0)
 }
 
 
-async function load(tg){
+let depthTimer = null;
 
-let L =
-document.getElementById(
-"list"
-);
+async function loadDepth(symbol){
 
-L.className =
-"loading";
+    const p=document.getElementById("panel")
 
-L.innerText =
-tg
-? "Telegram ile taranıyor..."
-: "BIST taranıyor...";
+    p.innerHTML=`
+    <div class="loading">
+    Derinlik verisi alınıyor...
+    </div>
+    `
 
-try{
+    try{
 
-let r =
-await fetch(
-"/api/market"
-+
-(
-tg
-? "?telegram=1"
-: ""
-)
-);
+        const r=await fetch("/api/live/"+symbol)
+        const j=await r.json()
 
-let j =
-await r.json();
+        if(!j.ok) throw new Error("Veri alınamadı")
 
-if(!r.ok){
+        const x=j.live
 
-throw new Error(
-j.error
-||
-"Veri alınamadı"
-);
+        const bidLot = Number(x.bid_size || 0)
+        const askLot = Number(x.ask_size || 0)
 
+        const total = bidLot + askLot
+
+        let buyPct = total ? (bidLot/total)*100 : 50
+        let sellPct = 100-buyPct
+
+        p.innerHTML=`
+
+        <div class="marketStrip">
+
+            <div>
+                <span>SON</span>
+                <b>₺${n(selected.price)}</b>
+            </div>
+
+            <div>
+                <span>DEĞİŞİM</span>
+                <b>%${n(selected.change)}</b>
+            </div>
+
+            <div>
+                <span>RSI</span>
+                <b>${n(selected.rsi,1)}</b>
+            </div>
+
+            <div>
+                <span>REL.HACİM</span>
+                <b>${n(selected.relative_volume,2)}x</b>
+            </div>
+
+            <div>
+                <span>SKOR</span>
+                <b>${selected.score}</b>
+            </div>
+
+        </div>
+
+
+        <div class="depthCard">
+
+            <div class="depthHead">
+                <div>EMİR</div>
+                <div>LOT</div>
+                <div>ALIŞ</div>
+                <div>SATIŞ</div>
+                <div>LOT</div>
+                <div>EMİR</div>
+            </div>
+
+
+            <div class="depthRow">
+
+                <div class="depthBuyBg"
+                     style="width:${buyPct/2}%"></div>
+
+                <div class="depthSellBg"
+                     style="width:${sellPct/2}%"></div>
+
+                <div>-</div>
+
+                <div class="depthBid">
+                    ${bidLot ? n(bidLot,0) : "-"}
+                </div>
+
+                <div class="depthBid">
+                    ${x.bid!==null ? n(x.bid) : "-"}
+                </div>
+
+                <div class="depthAsk">
+                    ${x.ask!==null ? n(x.ask) : "-"}
+                </div>
+
+                <div class="depthAsk">
+                    ${askLot ? n(askLot,0) : "-"}
+                </div>
+
+                <div>-</div>
+
+            </div>
+
+
+            <div class="depthBalance">
+
+                <div class="balanceBar">
+
+                    <div class="balanceBuy"
+                         style="width:${buyPct}%"></div>
+
+                    <div class="balanceSell"
+                         style="width:${sellPct}%"></div>
+
+                </div>
+
+                <div class="balanceText">
+
+                    <div class="buy">
+                        Alış %${n(buyPct,0)}
+                    </div>
+
+                    <div class="sell">
+                        Satış %${n(sellPct,0)}
+                    </div>
+
+                </div>
+
+            </div>
+
+        </div>
+
+
+        <div class="sectionTitle">
+        SON İŞLEMLER
+        </div>
+
+        <div class="locked">
+        Saat • fiyat • lot • alıcı kurum • satıcı kurum tablosu
+        için işlem tarafı verisi gerekiyor.
+
+        <br><br>
+
+        Şu anda gerçek kaynaktan yalnızca mevcut
+        alış/satış ve alış/satış lotları gösteriliyor.
+        Sahte kademe veya kurum adı üretilmiyor.
+        </div>
+        `
+
+    }catch(e){
+
+        p.innerHTML=`
+        <div class="warning">
+        Derinlik verisi şu anda alınamadı.
+        </div>
+        `
+    }
 }
 
-stocks =
-j.stocks || [];
+async function loadLive(symbol){
+    const p=document.getElementById("panel")
 
-summary();
+    p.innerHTML=`
+    <div class="card">
+    <h3>Canlı Alış / Satış</h3>
+    <div class="loading">Alış-satış verisi alınıyor...</div>
+    </div>
+    `
 
-render();
+    try{
+        const r=await fetch("/api/live/"+symbol)
+        const j=await r.json()
 
-if(tg){
+        if(!j.ok){
+            throw new Error("Veri alınamadı")
+        }
 
-alert(
-(j.telegram_sent || []).length
-? "Gönderildi: "
-+
-j.telegram_sent.join(", ")
-: "Yeni güçlü Telegram sinyali yok."
-);
+        const x=j.live
 
-}
+        p.innerHTML=`
+        <div class="card">
+        <h3>Canlı Alış / Satış</h3>
 
-}catch(e){
+        <div class="rows">
 
-L.className =
-"loading";
+        <div class="row">
+        <span>ALIŞ</span>
+        <b>${x.bid===null ? "-" : "₺"+n(x.bid)}</b>
+        </div>
 
-L.innerText =
-"❌ "
-+
-e.message;
+        <div class="row">
+        <span>SATIŞ</span>
+        <b>${x.ask===null ? "-" : "₺"+n(x.ask)}</b>
+        </div>
 
-}
+        <div class="row">
+        <span>ALIŞ LOT</span>
+        <b>${x.bid_size===null ? "-" : n(x.bid_size,0)}</b>
+        </div>
 
-}
+        <div class="row">
+        <span>SATIŞ LOT</span>
+        <b>${x.ask_size===null ? "-" : n(x.ask_size,0)}</b>
+        </div>
 
+        <div class="row">
+        <span>SPREAD</span>
+        <b>${x.spread===null ? "-" : "₺"+n(x.spread,4)}</b>
+        </div>
 
-function summary(){
+        <div class="row">
+        <span>SPREAD %</span>
+        <b>${x.spread_pct===null ? "-" : "%"+n(x.spread_pct,3)}</b>
+        </div>
 
-let u =
-stocks.filter(
-x =>
-x.change > 0.01
-).length;
+        <div class="row">
+        <span>SON</span>
+        <b>${x.last===null ? "-" : "₺"+n(x.last)}</b>
+        </div>
 
-let d =
-stocks.filter(
-x =>
-x.change < -0.01
-).length;
+        <div class="row">
+        <span>HACİM</span>
+        <b>${x.volume===null ? "-" : n(x.volume,0)}</b>
+        </div>
 
-let f =
-stocks.length
--
-u
--
-d;
+        </div>
+        </div>
 
-let s =
-stocks.filter(
-x =>
-x.score >= 110
-).length;
+        <div class="warning">
+        Bu veri WebSocket üzerinden alınır. BIST tarafında gecikmeli olabilir.
+        Bu ekran gerçek gelen değerleri gösterir; sahte alış/satış üretmez.
+        </div>
+        `
 
-document.getElementById(
-"total"
-).innerText =
-stocks.length;
-
-document.getElementById(
-"up"
-).innerText =
-u;
-
-document.getElementById(
-"strong"
-).innerText =
-s;
-
-document.getElementById(
-"u2"
-).innerText =
-u;
-
-document.getElementById(
-"d2"
-).innerText =
-d;
-
-document.getElementById(
-"f2"
-).innerText =
-f;
-
-}
-
-
-function setMode(m,e){
-
-mode = m;
-
-document.querySelectorAll(
-".tab"
-).forEach(
-x =>
-x.classList.remove(
-"active"
-)
-);
-
-e.classList.add(
-"active"
-);
-
-render();
-
-}
-
-
-function nav(m,e){
-
-mode = m;
-
-document.querySelectorAll(
-".nav"
-).forEach(
-x =>
-x.classList.remove(
-"active"
-)
-);
-
-e.classList.add(
-"active"
-);
-
-render();
-
-}
-
-
-function favNav(e){
-
-mode =
-"fav";
-
-document.querySelectorAll(
-".nav"
-).forEach(
-x =>
-x.classList.remove(
-"active"
-)
-);
-
-e.classList.add(
-"active"
-);
-
-render();
-
-}
-
-
-function tf(s){
-
-favs =
-favs.includes(s)
-?
-favs.filter(
-x =>
-x !== s
-)
-:
-[
-...favs,
-s
-];
-
-localStorage.setItem(
-"bistFavs",
-JSON.stringify(
-favs
-)
-);
-
-render();
-
-}
-
-
-function render(){
-
-let a =
-[
-...stocks
-];
-
-let q =
-document.getElementById(
-"q"
-)
-.value
-.trim()
-.toUpperCase();
-
-if(q){
-
-a =
-a.filter(
-x =>
-x.symbol.includes(q)
-||
-String(
-x.name
-)
-.toUpperCase()
-.includes(q)
-);
-
+    }catch(e){
+        p.innerHTML=`
+        <div class="warning">
+        Canlı alış/satış verisi şu anda alınamadı.
+        </div>
+        `
+    }
 }
 
 
-if(
-mode === "up"
-){
-
-a =
-a
-.filter(
-x =>
-x.change > 0
-)
-.sort(
-(a,b) =>
-b.change
--
-a.change
-);
-
-document.getElementById(
-"listTitle"
-).innerText =
-"📈 EN ÇOK YÜKSELENLER";
-
+function closeDetail(){
+    document.getElementById("detail").style.display="none"
+    document.getElementById("home").style.display="block"
 }
 
-else if(
-mode === "down"
-){
+function detailTab(tab,el){
 
-a =
-a
-.filter(
-x =>
-x.change < 0
-)
-.sort(
-(a,b) =>
-a.change
--
-b.change
-);
+    document.querySelectorAll(".detailTabs button")
+        .forEach(b=>b.classList.remove("active"))
 
-document.getElementById(
-"listTitle"
-).innerText =
-"📉 EN ÇOK DÜŞENLER";
+    el.classList.add("active")
 
+    const s=selected
+    const p=document.getElementById("panel")
+
+    if(tab==="depth"){
+        loadDepth(s.symbol);
+
+        depthTimer = setInterval(()=>{
+            loadDepth(s.symbol);
+        },1000);
+
+        return
+    }
+
+    if(tab==="kademe"){
+        loadDepth(s.symbol);
+
+        depthTimer = setInterval(()=>{
+            loadDepth(s.symbol);
+        },1000);
+
+        return
+    }
+
+    if(tab==="signals"){
+
+        let durum = s.signal || "-"
+        let rsiText = "-"
+
+        if(s.rsi!==null){
+            if(s.rsi>=70) rsiText="Aşırı güçlü / dikkat"
+            else if(s.rsi>=55) rsiText="Pozitif momentum"
+            else if(s.rsi>=45) rsiText="Nötr"
+            else rsiText="Zayıf momentum"
+        }
+
+        p.innerHTML=`
+
+        <div class="signalBox">
+            <div>TEKNİK SKOR</div>
+            <div class="signalBig">${s.score}/150</div>
+            <b>${durum}</b>
+        </div>
+
+        <div class="card">
+
+            <div class="rows">
+
+                <div class="row">
+                <span>RSI</span>
+                <b>${n(s.rsi,1)}</b>
+                </div>
+
+                <div class="row">
+                <span>RSI DURUM</span>
+                <b>${rsiText}</b>
+                </div>
+
+                <div class="row">
+                <span>MACD</span>
+                <b>${n(s.macd,3)}</b>
+                </div>
+
+                <div class="row">
+                <span>MACD SIGNAL</span>
+                <b>${n(s.macd_signal,3)}</b>
+                </div>
+
+                <div class="row">
+                <span>EMA20</span>
+                <b>${n(s.ema20)}</b>
+                </div>
+
+                <div class="row">
+                <span>EMA50</span>
+                <b>${n(s.ema50)}</b>
+                </div>
+
+                <div class="row">
+                <span>REL. HACİM</span>
+                <b>${n(s.relative_volume,2)}x</b>
+                </div>
+
+                <div class="row">
+                <span>GÜNLÜK</span>
+                <b>%${n(s.change)}</b>
+                </div>
+
+            </div>
+
+        </div>
+        `
+
+        return
+    }
+
+    if(tab==="summary"){
+        p.innerHTML=`
+
+        <div class="marketStrip">
+
+        <div>
+        <span>FİYAT</span>
+        <b>₺${n(s.price)}</b>
+        </div>
+
+        <div>
+        <span>DEĞİŞİM</span>
+        <b>%${n(s.change)}</b>
+        </div>
+
+        <div>
+        <span>RSI</span>
+        <b>${n(s.rsi,1)}</b>
+        </div>
+
+        <div>
+        <span>REL.HACİM</span>
+        <b>${n(s.relative_volume,2)}x</b>
+        </div>
+
+        <div>
+        <span>SKOR</span>
+        <b>${s.score}</b>
+        </div>
+
+        </div>
+
+        <div class="card">
+        <h3>Piyasa Özeti</h3>
+
+        <div class="rows">
+
+        <div class="row">
+        <span>Son Fiyat</span>
+        <b>₺${n(s.price)}</b>
+        </div>
+
+        <div class="row">
+        <span>Günlük Değişim</span>
+        <b>%${n(s.change)}</b>
+        </div>
+
+        <div class="row">
+        <span>Hacim</span>
+        <b>${money(s.volume)}</b>
+        </div>
+
+        <div class="row">
+        <span>Piyasa Değeri</span>
+        <b>${money(s.market_cap)}</b>
+        </div>
+
+        <div class="row">
+        <span>Relative Volume</span>
+        <b>${n(s.relative_volume)}x</b>
+        </div>
+
+        <div class="row">
+        <span>Teknik Sinyal</span>
+        <b>${s.signal}</b>
+        </div>
+
+        </div>
+        </div>
+        `
+    }
+
+    if(tab==="live"){
+        loadLive(s.symbol)
+    }
+
+    if(tab==="chart"){
+        p.innerHTML=`
+        <div class="card">
+        <h3>Grafik</h3>
+        <div class="warning">
+        Gün içi mum grafik ve geçmiş fiyat serisi sonraki veri
+        kaynağı bağlantısıyla burada gösterilecek.
+        </div>
+        </div>
+        `
+    }
+
+    if(tab==="technical"){
+        p.innerHTML=`
+        <div class="card">
+        <h3>Teknik Göstergeler</h3>
+
+        <div class="rows">
+
+        <div class="row">
+        <span>RSI</span>
+        <b>${n(s.rsi,1)}</b>
+        </div>
+
+        <div class="row">
+        <span>MACD</span>
+        <b>${n(s.macd,3)}</b>
+        </div>
+
+        <div class="row">
+        <span>MACD Signal</span>
+        <b>${n(s.macd_signal,3)}</b>
+        </div>
+
+        <div class="row">
+        <span>EMA20</span>
+        <b>₺${n(s.ema20)}</b>
+        </div>
+
+        <div class="row">
+        <span>EMA50</span>
+        <b>₺${n(s.ema50)}</b>
+        </div>
+
+        <div class="row">
+        <span>SMA20</span>
+        <b>₺${n(s.sma20)}</b>
+        </div>
+
+        </div>
+        </div>
+        `
+    }
+
+    if(tab==="akd"){
+        p.innerHTML=`
+        <div class="card">
+        <h3>Aracı Kurum Dağılımı — AKD</h3>
+        </div>
+
+        <div class="warning">
+        Burada kurum bazında
+        <b>Alış Lot • Satış Lot • Net Lot • Net TL • En Güçlü Alıcılar • En Güçlü Satıcılar</b>
+        gösterilecek.
+
+        <br><br>
+
+        Gerçek AKD verisi mevcut ücretsiz tarama kaynağında bulunmadığı
+        için şu anda rakam uydurmuyoruz. Lisanslı AKD kaynağı bağlandığında
+        bu sekme otomatik gerçek verilerle dolacak.
+        </div>
+        `
+    }
+
+    if(tab==="takas"){
+        p.innerHTML=`
+        <div class="card">
+        <h3>Takas / Saklama</h3>
+        </div>
+
+        <div class="warning">
+        Kurumların saklama oranları, takas değişimleri ve yoğunlaşma
+        verileri için gerçek takas veri sağlayıcısı bağlanması gerekiyor.
+        </div>
+        `
+    }
+
+    if(tab==="kap"){
+        p.innerHTML=`
+        <div class="card">
+        <h3>KAP Haberleri</h3>
+        <div class="warning">
+        ${s.symbol} için güncel KAP bildirimleri bu bölüme bağlanacak.
+        </div>
+        </div>
+        `
+    }
+
+    if(tab==="ai"){
+        const w=Math.min(100,(s.score/150)*100)
+
+        p.innerHTML=`
+        <div class="card">
+
+        <h3>AI / Teknik Skor</h3>
+
+        <div class="score">${s.score}</div>
+        <div>${s.signal}</div>
+
+        <div class="bar">
+        <div style="width:${w}%"></div>
+        </div>
+
+        </div>
+
+        <div class="warning">
+        Bu skor şu anda RSI, hacim, trend, MACD ve teknik göstergelerden
+        oluşturulan kural tabanlı analiz skorudur. Kesin yükseliş tahmini
+        veya yatırım tavsiyesi değildir.
+        </div>
+        `
+    }
 }
 
-else if(
-mode === "volume"
-){
-
-a.sort(
-(a,b) =>
-b.relative_volume
--
-a.relative_volume
-);
-
-document.getElementById(
-"listTitle"
-).innerText =
-"📊 HACİM RADARI";
-
-}
-
-else if(
-mode === "signal"
-){
-
-a =
-a
-.filter(
-x =>
-x.score >= 90
-)
-.sort(
-(a,b) =>
-b.score
--
-a.score
-);
-
-document.getElementById(
-"listTitle"
-).innerText =
-"🧠 AKILLI SİNYALLER";
-
-}
-
-else if(
-mode === "fav"
-){
-
-a =
-a
-.filter(
-x =>
-favs.includes(
-x.symbol
-)
-)
-.sort(
-(a,b) =>
-b.score
--
-a.score
-);
-
-document.getElementById(
-"listTitle"
-).innerText =
-"⭐ FAVORİLER";
-
-}
-
-else{
-
-a.sort(
-(a,b) =>
-b.score
--
-a.score
-);
-
-document.getElementById(
-"listTitle"
-).innerText =
-"BIST HİSSELERİ";
-
-}
-
-
-let L =
-document.getElementById(
-"list"
-);
-
-L.className = "";
-
-if(!a.length){
-
-L.innerHTML =
-'<div class="loading">Sonuç yok.</div>';
-
-return;
-
-}
-
-
-L.innerHTML =
-a.map(
-x => `
-
-<div class="stock">
-
-<div class="row">
-
-<div>
-
-<div>
-
-<span class="sym">
-${esc(x.symbol)}
-</span>
-
-<button
-class="fav ${
-favs.includes(
-x.symbol
-)
-? "on"
-: ""
-}"
-onclick="tf('${esc(x.symbol)}')"
->
-
-${
-favs.includes(
-x.symbol
-)
-? "★"
-: "☆"
-}
-
-</button>
-
-</div>
-
-<div class="name">
-${esc(x.name)}
-</div>
-
-</div>
-
-<div>
-
-<div class="price">
-${Number(x.price).toFixed(2)} ₺
-</div>
-
-<div
-class="chg ${
-x.change >= 0
-? "green"
-: "red"
-}"
->
-
-${
-x.change >= 0
-? "+"
-: ""
-}
-${Number(x.change).toFixed(2)}%
-
-</div>
-
-</div>
-
-</div>
-
-<div class="metrics">
-
-<div class="m">
-<div class="mv">
-${x.rsi}
-</div>
-<div class="ml">
-RSI
-</div>
-</div>
-
-<div class="m">
-<div class="mv">
-${x.relative_volume}x
-</div>
-<div class="ml">
-HACİM
-</div>
-</div>
-
-<div class="m">
-<div class="mv">
-${x.ema20}
-</div>
-<div class="ml">
-EMA20
-</div>
-</div>
-
-<div class="m">
-<div class="mv">
-${x.recommend}
-</div>
-<div class="ml">
-TEKNİK
-</div>
-</div>
-
-</div>
-
-<div class="sigrow">
-
-<span
-class="sig ${
-x.score >= 110
-? "strong"
-:
-x.score >= 90
-? "watch"
-: ""
-}"
->
-
-${x.emoji}
-${esc(x.signal)}
-
-</span>
-
-<span class="score">
-${x.score}/150
-</span>
-
-</div>
-
-<div class="reason">
-
-${
-(x.reasons || [])
-.slice(0,5)
-.map(
-r =>
-"✓ "
-+
-esc(r)
-)
-.join(" • ")
-}
-
-</div>
-
-</div>
-
-`
-).join("");
-
-}
-
-
-load(false);
+load()
+setInterval(load,60000)
 
 </script>
 
 </body>
-
 </html>
-"""
+'''
 
 
-@app.route("/")
-def index():
-    return render_template_string(
-        HTML
-    )
+@app.route("/api/live/<symbol>")
+def api_live(symbol):
+    symbol = symbol.upper().strip()
 
+    with LIVE_LOCK:
+        cached = LIVE_CACHE.get(symbol)
 
-@app.route("/api/market")
-def api_market():
-    try:
-        stocks, sent = refresh_cache(
-            send_tg=(
-                request.args.get(
-                    "telegram"
-                )
-                == "1"
-            )
-        )
+    if cached and time.time() - cached.get("updated", 0) < 8:
+        data = cached
+    else:
+        data = fetch_live_quote(symbol)
 
-        return jsonify({
-            "ok": True,
-            "count": len(stocks),
-            "telegram_sent": sent,
-            "stocks": stocks
-        })
+    bid = data.get("bid")
+    ask = data.get("ask")
 
-    except Exception as e:
-        return jsonify({
-            "ok": False,
-            "error": str(e)
-        }), 500
+    spread = None
+    spread_pct = None
 
+    if bid is not None and ask is not None:
+        spread = ask - bid
 
-@app.route("/api/telegram-test")
-def telegram_test():
-    if not BOT_TOKEN or not CHAT_ID:
-        return jsonify({
-            "ok": False,
-            "error": "Telegram ayarları yapılmadı"
-        }), 400
+        if bid:
+            spread_pct = (spread / bid) * 100
 
-    url = (
-        f"https://api.telegram.org/bot"
-        f"{BOT_TOKEN}/sendMessage"
-    )
-
-    r = requests.post(
-        url,
-        data={
-            "chat_id": CHAT_ID,
-            "text": "✅ BIST RADAR Telegram bağlantısı başarılı."
-        },
-        timeout=15
-    )
+    data["spread"] = spread
+    data["spread_pct"] = spread_pct
 
     return jsonify({
-        "ok": r.ok,
-        "response": r.text[:500]
+        "ok": True,
+        "live": data,
+        "note": "TradingView WebSocket verisi. BIST verisi gecikmeli olabilir."
     })
 
 
+
+@app.route("/")
+def home():
+    return render_template_string(HTML)
+
+
 if __name__ == "__main__":
+
     threading.Thread(
         target=background_loop,
         daemon=True
     ).start()
 
-    print(
-        "BIST RADAR AI AKTİF"
-    )
+    port = int(os.environ.get("PORT", 5000))
 
-    print(
-        "http://127.0.0.1:5000"
-    )
+    print("BIST VERİ TERMİNALİ V2 AKTİF")
+    print("http://127.0.0.1:%s" % port)
 
     app.run(
         host="0.0.0.0",
-        port=5000,
+        port=port,
         debug=False,
         threaded=True
     )
