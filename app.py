@@ -1944,7 +1944,7 @@ function detailTab(tab,el){
 load()
 loadKurlar()
 setInterval(load,60000)
-setInterval(loadKurlar,30000)
+setInterval(loadKurlar, 5000)
 
 </script>
 
