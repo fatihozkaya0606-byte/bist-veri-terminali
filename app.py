@@ -1127,24 +1127,28 @@ oninput="renderStocks()">
         <span>DOLAR / TL</span>
         <b id="usdKur">-</b>
         <small id="usdAlt" style="color:#7f8ca0">yükleniyor...</small>
+<div id="usdDeg" style="font-size:12px;margin-top:4px">—</div>
     </div>
 
     <div class="stat">
         <span>EURO / TL</span>
         <b id="eurKur">-</b>
         <small id="eurAlt" style="color:#7f8ca0">yükleniyor...</small>
+<div id="eurDeg" style="font-size:12px;margin-top:4px">—</div>
     </div>
 
     <div class="stat">
         <span>GRAM ALTIN</span>
         <b id="gramKur">-</b>
         <small id="gramAlt" style="color:#7f8ca0">yükleniyor...</small>
+<div id="gramDeg" style="font-size:12px;margin-top:4px">—</div>
     </div>
 
     <div class="stat">
         <span>ÇEYREK ALTIN</span>
         <b id="ceyrekKur">-</b>
         <small id="ceyrekAlt" style="color:#7f8ca0">yükleniyor...</small>
+<div id="ceyrekDeg" style="font-size:12px;margin-top:4px">—</div>
     </div>
 </div>
 
@@ -1240,11 +1244,48 @@ function money(v){
 
 
 
+const kurYuzdeOnceki = {
+    usd:null,
+    eur:null,
+    gram:null,
+    ceyrek:null
+}
+
 const oncekiKur = {
     usd:null,
     eur:null,
     gram:null,
     ceyrek:null
+}
+
+
+function kurDegisimYaz(key, yeni){
+    const eski = kurYuzdeOnceki[key]
+    kurYuzdeOnceki[key] = Number(yeni)
+
+    const el = document.getElementById(key+"Deg")
+    if(!el) return
+
+    if(eski===null || yeni===null || yeni===undefined){
+        el.innerHTML='<span style="color:#7f8ca0">—</span>'
+        return
+    }
+
+    const fark = Number(yeni)-Number(eski)
+    const yuzde = eski ? (fark/Number(eski))*100 : 0
+
+    if(fark>0){
+        el.innerHTML=
+          '<span style="color:#20d391;font-weight:700">▲ '+
+          n(fark,4)+' (%'+n(yuzde,2)+')</span>'
+    }else if(fark<0){
+        el.innerHTML=
+          '<span style="color:#ff5c6c;font-weight:700">▼ '+
+          n(fark,4)+' (%'+n(yuzde,2)+')</span>'
+    }else{
+        el.innerHTML=
+          '<span style="color:#7f8ca0">■ 0,00 (%0,00)</span>'
+    }
 }
 
 function yonOku(key, yeni, kart){
@@ -1302,7 +1343,8 @@ async function loadKurlar(){
                 el.innerHTML =
                     '<span style="display:flex;align-items:center;gap:7px">' +
                     '<span>₺'+n(x.sell,basamak)+'</span>' +
-                    yonOku(key, x.sell, el.closest(".stat")) +
+                    yonOku(key, x.sell, el.closest(".stat"))
+                    kurDegisimYaz(key, x.sell) +
                     '</span>'
             }else{
                 el.textContent = "-"
