@@ -500,135 +500,127 @@ def _tr_num(v):
 def fetch_fx_gold_full():
     import requests
 
-    url = "https://finans.truncgil.com/today.json"
-    r = requests.get(
-        url,
-        timeout=12,
-        headers={"User-Agent": "Mozilla/5.0"}
+    r=requests.get(
+        "https://finans.truncgil.com/v3/today.json",
+        timeout=15,
+        headers={"User-Agent":"Mozilla/5.0"}
     )
     r.raise_for_status()
-    j = r.json()
+    j=r.json()
 
-    doviz = []
-    altin = []
+    doviz=[]
+    altin=[]
 
-    fx_map = {
-        "Dolar": ("USD", "DOLAR"),
-        "Euro": ("EUR", "EURO"),
-        "İngiliz Sterlini": ("GBP", "STERLİN"),
-        "İsviçre Frangı": ("CHF", "İSVİÇRE FRANGI"),
-        "Kanada Doları": ("CAD", "KANADA DOLARI"),
-        "Avustralya Doları": ("AUD", "AVUSTRALYA DOLARI"),
-        "Japon Yeni": ("JPY", "JAPON YENİ"),
-        "Suudi Arabistan Riyali": ("SAR", "SUUDİ RİYALİ"),
-        "Rus Rublesi": ("RUB", "RUS RUBLESİ"),
-        "Çin Yuanı": ("CNY", "ÇİN YUANI")
+    fx_symbols={
+        "USD":"USD","EUR":"EUR","GBP":"GBP","CHF":"CHF",
+        "CAD":"CAD","AUD":"AUD","RUB":"RUB","AED":"AED",
+        "DKK":"DKK","SEK":"SEK","NOK":"NOK","JPY":"JPY"
     }
 
-    gold_keys = {
-        "Gram Altın": ("GA", "GRAM ALTIN"),
-        "Çeyrek Altın": ("Ç", "ÇEYREK ALTIN"),
-        "Yarım Altın": ("Y", "YARIM ALTIN"),
-        "Tam Altın": ("TA", "TAM ALTIN"),
-        "Cumhuriyet Altını": ("CA", "CUMHURİYET ALTINI"),
-        "Ata Altın": ("ATA", "ATA ALTIN"),
-        "14 Ayar Altın": ("14A", "14 AYAR ALTIN"),
-        "18 Ayar Altın": ("18A", "18 AYAR ALTIN"),
-        "22 Ayar Bilezik": ("22A", "22 AYAR BİLEZİK"),
-        "İkibuçuk Altın": ("2.5", "İKİBUÇUK ALTIN"),
-        "Beşli Altın": ("5L", "BEŞLİ ALTIN"),
-        "Gremse Altın": ("GR", "GREMSE ALTIN"),
-        "Ons": ("XAU", "ONS ALTIN"),
-        "Gümüş": ("XAG", "GÜMÜŞ")
+    gold_symbols={
+        "gram-has-altin":"GA",
+        "ceyrek-altin":"Ç",
+        "yarim-altin":"Y",
+        "tam-altin":"TA",
+        "cumhuriyet-altini":"CA",
+        "ata-altin":"ATA",
+        "14-ayar-altin":"14A",
+        "18-ayar-altin":"18A",
+        "22-ayar-bilezik":"22A",
+        "ikibucuk-altin":"2.5",
+        "besli-altin":"5L",
+        "gremse-altin":"GR",
+        "resat-altin":"RŞ",
+        "hamit-altin":"HM",
+        "gumus":"XAG",
+        "gram-platin":"XPT",
+        "gram-paladyum":"XPD"
     }
 
-    for k, (sym, name) in fx_map.items():
-        x = j.get(k)
-        if not isinstance(x, dict):
-            continue
-        buy = _tr_num(x.get("Alış"))
-        sell = _tr_num(x.get("Satış"))
-        if buy is None and sell is None:
-            continue
-        doviz.append({
-            "symbol": sym,
-            "name": name,
-            "buy": buy,
-            "sell": sell
-        })
+    def val(x,*names):
+        for n in names:
+            if n in x and x[n] not in (None,""):
+                return _tr_num(x[n])
+        return None
 
-    for k, (sym, name) in gold_keys.items():
-        x = j.get(k)
-        if not isinstance(x, dict):
+    for key,x in j.items():
+        if not isinstance(x,dict):
             continue
-        buy = _tr_num(x.get("Alış"))
-        sell = _tr_num(x.get("Satış"))
-        if buy is None and sell is None:
-            continue
-        altin.append({
-            "symbol": sym,
-            "name": name,
-            "buy": buy,
-            "sell": sell
-        })
 
-    return doviz, altin
+        lk=str(key).lower()
+
+        buy=val(x,"Buying","buying","Alış","alis")
+        sell=val(x,"Selling","selling","Satış","satis")
+        chg=val(x,"Change","change","Değişim","degisim")
+
+        if key in fx_symbols:
+            doviz.append({
+                "symbol":fx_symbols[key],
+                "name":x.get("Name") or key,
+                "buy":buy,
+                "sell":sell,
+                "change_pct":chg
+            })
+            continue
+
+        for gkey,sym in gold_symbols.items():
+            if lk == gkey:
+                altin.append({
+                    "symbol":sym,
+                    "name":x.get("Name") or key.replace("-"," ").upper(),
+                    "buy":buy,
+                    "sell":sell,
+                    "change_pct":chg
+                })
+                break
+
+    return doviz,altin
 
 
 def fetch_crypto_full():
     import requests
 
-    ids = (
-        "bitcoin,ethereum,tether,binancecoin,solana,"
-        "ripple,cardano,dogecoin,polkadot,tron,"
-        "avalanche-2,chainlink,shiba-inu"
-    )
+    tickers=[
+        "BINANCE:BTCUSDT","BINANCE:ETHUSDT",
+        "BINANCE:BNBUSDT","BINANCE:SOLUSDT",
+        "BINANCE:XRPUSDT","BINANCE:ADAUSDT",
+        "BINANCE:DOGEUSDT","BINANCE:AVAXUSDT",
+        "BINANCE:LINKUSDT","BINANCE:TRXUSDT",
+        "BINANCE:DOTUSDT","BINANCE:SHIBUSDT"
+    ]
 
-    url = (
-        "https://api.coingecko.com/api/v3/simple/price"
-        "?ids=" + ids +
-        "&vs_currencies=usd"
-        "&include_24hr_change=true"
-    )
-
-    r = requests.get(
-        url,
-        timeout=12,
-        headers={"User-Agent": "Mozilla/5.0"}
-    )
-    r.raise_for_status()
-    j = r.json()
-
-    names = {
-        "bitcoin": ("BTC", "BITCOIN"),
-        "ethereum": ("ETH", "ETHEREUM"),
-        "tether": ("USDT", "TETHER"),
-        "binancecoin": ("BNB", "BNB"),
-        "solana": ("SOL", "SOLANA"),
-        "ripple": ("XRP", "XRP"),
-        "cardano": ("ADA", "CARDANO"),
-        "dogecoin": ("DOGE", "DOGECOIN"),
-        "polkadot": ("DOT", "POLKADOT"),
-        "tron": ("TRX", "TRON"),
-        "avalanche-2": ("AVAX", "AVALANCHE"),
-        "chainlink": ("LINK", "CHAINLINK"),
-        "shiba-inu": ("SHIB", "SHIBA INU")
+    payload={
+        "symbols":{"tickers":tickers,"query":{"types":[]}},
+        "columns":["name","description","close","change","volume"]
     }
 
-    out = []
+    r=requests.post(
+        "https://scanner.tradingview.com/crypto/scan",
+        json=payload,
+        timeout=15,
+        headers={
+            "User-Agent":"Mozilla/5.0",
+            "Content-Type":"text/plain;charset=UTF-8",
+            "Origin":"https://www.tradingview.com"
+        }
+    )
+    r.raise_for_status()
 
-    for cid, (sym, name) in names.items():
-        x = j.get(cid, {})
-        price = _tr_num(x.get("usd"))
-        chg = _tr_num(x.get("usd_24h_change"))
-        if price is None:
+    out=[]
+
+    for item in r.json().get("data",[]):
+        d=item.get("d") or []
+        if len(d)<5:
             continue
 
+        sym=str(d[0]).replace("USDT","")
+
         out.append({
-            "symbol": sym,
-            "name": name,
-            "price": price,
-            "change_pct": chg
+            "symbol":sym,
+            "name":d[1] or sym,
+            "price":d[2],
+            "change_pct":d[3],
+            "volume":d[4]
         })
 
     return out
@@ -637,7 +629,7 @@ def fetch_crypto_full():
 def fetch_bist_full():
     import requests
 
-    tickers = [
+    tickers=[
         "BIST:THYAO","BIST:ASELS","BIST:TUPRS","BIST:EREGL",
         "BIST:KCHOL","BIST:SISE","BIST:AKBNK","BIST:GARAN",
         "BIST:YKBNK","BIST:ISCTR","BIST:SAHOL","BIST:FROTO",
@@ -648,42 +640,32 @@ def fetch_bist_full():
         "BIST:OYAKC","BIST:VAKBN"
     ]
 
-    payload = {
-        "symbols": {
-            "tickers": tickers,
-            "query": {"types": []}
-        },
-        "columns": [
-            "name",
-            "description",
-            "close",
-            "change",
-            "volume"
-        ]
+    payload={
+        "symbols":{"tickers":tickers,"query":{"types":[]}},
+        "columns":["name","description","close","change","volume"]
     }
 
-    r = requests.post(
+    r=requests.post(
         "https://scanner.tradingview.com/turkey/scan",
         json=payload,
         timeout=15,
-        headers={"User-Agent": "Mozilla/5.0"}
+        headers={"User-Agent":"Mozilla/5.0"}
     )
     r.raise_for_status()
-    j = r.json()
 
-    out = []
+    out=[]
 
-    for item in j.get("data", []):
-        d = item.get("d") or []
-        if len(d) < 5:
+    for item in r.json().get("data",[]):
+        d=item.get("d") or []
+        if len(d)<5:
             continue
 
         out.append({
-            "symbol": d[0],
-            "name": d[1] or d[0],
-            "price": d[2],
-            "change_pct": d[3],
-            "volume": d[4]
+            "symbol":d[0],
+            "name":d[1] or d[0],
+            "price":d[2],
+            "change_pct":d[3],
+            "volume":d[4]
         })
 
     return out
