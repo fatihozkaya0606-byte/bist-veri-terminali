@@ -1334,7 +1334,9 @@ async function loadKurlar(){
 
         function val(x,...keys){
             for(const k of keys){
-                if(x && x[k]!==null && x[k]!==undefined) return Number(x[k])
+                if(x && x[k]!==null && x[k]!==undefined){
+                    return Number(x[k])
+                }
             }
             return null
         }
@@ -1344,43 +1346,44 @@ async function loadKurlar(){
 
             const sell=val(x,"sell","satis","satış")
             const buy=val(x,"buy","alis","alış")
+            const el=document.getElementById(id)
+            const alt=document.getElementById(altId)
 
-            let pct=val(
-                x,
-                "degisim_pct",
-                "change_pct",
-                "changePercent",
-                "change_percent",
-                "yuzde"
-            )
+            if(sell!==null){
+                const yeni="₺"+n(sell,digit)
+                const eski=el.dataset.price
 
-            let fark=val(
-                x,
-                "degisim",
-                "change",
-                "fark"
-            )
+                if(eski!==String(sell)){
+                    let ok='—'
+                    let renk='#7f8ca0'
 
-            let yon="■"
-            let renk="#7f8ca0"
+                    if(eski!==undefined && eski!==""){
+                        if(sell>Number(eski)){
+                            ok='▲'
+                            renk='#20d391'
+                        }else if(sell<Number(eski)){
+                            ok='▼'
+                            renk='#ff5c6c'
+                        }
+                    }
 
-            if(pct!==null){
-                if(pct>0){ yon="▲"; renk="#20d391" }
-                else if(pct<0){ yon="▼"; renk="#ff5c6c" }
-            }else if(fark!==null){
-                if(fark>0){ yon="▲"; renk="#20d391" }
-                else if(fark<0){ yon="▼"; renk="#ff5c6c" }
+                    el.innerHTML=
+                        '<span>'+yeni+'</span> '+
+                        '<span style="color:'+renk+
+                        ';font-size:13px;font-weight:800;margin-left:6px">'+
+                        ok+
+                        '</span>'
+
+                    el.dataset.price=String(sell)
+                }
             }
 
-            document.getElementById(id).innerHTML=
-                '<span>₺'+n(sell,digit)+'</span> '+
-                '<span style="color:'+renk+
-                ';font-size:13px;font-weight:800;margin-left:6px">'+
-                yon+' '+(pct!==null ? '%'+n(pct,2) : '')+
-                '</span>'
-
-            document.getElementById(altId).textContent=
-                buy!==null ? "Alış ₺"+n(buy,digit) : "Alış verisi yok"
+            if(buy!==null){
+                const yeniAlt="Alış ₺"+n(buy,digit)
+                if(alt.textContent!==yeniAlt){
+                    alt.textContent=yeniAlt
+                }
+            }
         }
 
         yaz("usdKur","usdAlt",d.usd,4)
