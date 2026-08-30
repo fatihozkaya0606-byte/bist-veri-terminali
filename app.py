@@ -1168,6 +1168,33 @@ function money(v){
 }
 
 
+
+const oncekiKur = {
+    usd:null,
+    eur:null,
+    gram:null,
+    ceyrek:null
+}
+
+function yonOku(key, yeni){
+    const eski = oncekiKur[key]
+    oncekiKur[key] = yeni
+
+    if(eski===null || yeni===null || yeni===undefined){
+        return '<span style="color:#7f8ca0;font-size:18px">—</span>'
+    }
+
+    if(Number(yeni) > Number(eski)){
+        return '<span style="color:#20d391;font-size:20px;font-weight:900">↑</span>'
+    }
+
+    if(Number(yeni) < Number(eski)){
+        return '<span style="color:#ff5c6c;font-size:20px;font-weight:900">↓</span>'
+    }
+
+    return '<span style="color:#7f8ca0;font-size:18px">—</span>'
+}
+
 function kurObj(x){
     if(!x) return {buy:null,sell:null}
 
@@ -1186,20 +1213,28 @@ async function loadKurlar(){
 
         const d = j.data || {}
 
-        function yaz(id, altId, veri, basamak){
+        function yaz(id, altId, veri, basamak, key){
             const x = kurObj(veri)
+            const el = document.getElementById(id)
 
-            document.getElementById(id).textContent =
-                x.sell != null ? "₺"+n(x.sell,basamak) : "-"
+            if(x.sell != null){
+                el.innerHTML =
+                    '<span style="display:flex;align-items:center;gap:7px">' +
+                    '<span>₺'+n(x.sell,basamak)+'</span>' +
+                    yonOku(key, x.sell) +
+                    '</span>'
+            }else{
+                el.textContent = "-"
+            }
 
             document.getElementById(altId).textContent =
                 x.buy != null ? "Alış ₺"+n(x.buy,basamak) : "Alış verisi yok"
         }
 
-        yaz("usdKur","usdAlt",d.usd,4)
-        yaz("eurKur","eurAlt",d.eur,4)
-        yaz("gramKur","gramAlt",d.gram,2)
-        yaz("ceyrekKur","ceyrekAlt",d.ceyrek,2)
+        yaz("usdKur","usdAlt",d.usd,4,"usd")
+        yaz("eurKur","eurAlt",d.eur,4,"eur")
+        yaz("gramKur","gramAlt",d.gram,2,"gram")
+        yaz("ceyrekKur","ceyrekAlt",d.ceyrek,2,"ceyrek")
 
     }catch(e){
         console.log("Kur hatası:",e)
