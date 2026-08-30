@@ -473,6 +473,259 @@ def api_kurlar():
         "data": fetch_kurlar()
     })
 
+
+# =========================
+# PIYASA TERMINALI API
+# =========================
+
+def _tr_num(v):
+    if v is None:
+        return None
+    if isinstance(v, (int, float)):
+        return float(v)
+    x = str(v).strip().replace(" ", "")
+    if "," in x and "." in x:
+        if x.rfind(",") > x.rfind("."):
+            x = x.replace(".", "").replace(",", ".")
+        else:
+            x = x.replace(",", "")
+    elif "," in x:
+        x = x.replace(",", ".")
+    try:
+        return float(x)
+    except:
+        return None
+
+
+def fetch_fx_gold_full():
+    import requests
+
+    url = "https://finans.truncgil.com/today.json"
+    r = requests.get(
+        url,
+        timeout=12,
+        headers={"User-Agent": "Mozilla/5.0"}
+    )
+    r.raise_for_status()
+    j = r.json()
+
+    doviz = []
+    altin = []
+
+    fx_map = {
+        "Dolar": ("USD", "DOLAR"),
+        "Euro": ("EUR", "EURO"),
+        "İngiliz Sterlini": ("GBP", "STERLİN"),
+        "İsviçre Frangı": ("CHF", "İSVİÇRE FRANGI"),
+        "Kanada Doları": ("CAD", "KANADA DOLARI"),
+        "Avustralya Doları": ("AUD", "AVUSTRALYA DOLARI"),
+        "Japon Yeni": ("JPY", "JAPON YENİ"),
+        "Suudi Arabistan Riyali": ("SAR", "SUUDİ RİYALİ"),
+        "Rus Rublesi": ("RUB", "RUS RUBLESİ"),
+        "Çin Yuanı": ("CNY", "ÇİN YUANI")
+    }
+
+    gold_keys = {
+        "Gram Altın": ("GA", "GRAM ALTIN"),
+        "Çeyrek Altın": ("Ç", "ÇEYREK ALTIN"),
+        "Yarım Altın": ("Y", "YARIM ALTIN"),
+        "Tam Altın": ("TA", "TAM ALTIN"),
+        "Cumhuriyet Altını": ("CA", "CUMHURİYET ALTINI"),
+        "Ata Altın": ("ATA", "ATA ALTIN"),
+        "14 Ayar Altın": ("14A", "14 AYAR ALTIN"),
+        "18 Ayar Altın": ("18A", "18 AYAR ALTIN"),
+        "22 Ayar Bilezik": ("22A", "22 AYAR BİLEZİK"),
+        "İkibuçuk Altın": ("2.5", "İKİBUÇUK ALTIN"),
+        "Beşli Altın": ("5L", "BEŞLİ ALTIN"),
+        "Gremse Altın": ("GR", "GREMSE ALTIN"),
+        "Ons": ("XAU", "ONS ALTIN"),
+        "Gümüş": ("XAG", "GÜMÜŞ")
+    }
+
+    for k, (sym, name) in fx_map.items():
+        x = j.get(k)
+        if not isinstance(x, dict):
+            continue
+        buy = _tr_num(x.get("Alış"))
+        sell = _tr_num(x.get("Satış"))
+        if buy is None and sell is None:
+            continue
+        doviz.append({
+            "symbol": sym,
+            "name": name,
+            "buy": buy,
+            "sell": sell
+        })
+
+    for k, (sym, name) in gold_keys.items():
+        x = j.get(k)
+        if not isinstance(x, dict):
+            continue
+        buy = _tr_num(x.get("Alış"))
+        sell = _tr_num(x.get("Satış"))
+        if buy is None and sell is None:
+            continue
+        altin.append({
+            "symbol": sym,
+            "name": name,
+            "buy": buy,
+            "sell": sell
+        })
+
+    return doviz, altin
+
+
+def fetch_crypto_full():
+    import requests
+
+    ids = (
+        "bitcoin,ethereum,tether,binancecoin,solana,"
+        "ripple,cardano,dogecoin,polkadot,tron,"
+        "avalanche-2,chainlink,shiba-inu"
+    )
+
+    url = (
+        "https://api.coingecko.com/api/v3/simple/price"
+        "?ids=" + ids +
+        "&vs_currencies=usd"
+        "&include_24hr_change=true"
+    )
+
+    r = requests.get(
+        url,
+        timeout=12,
+        headers={"User-Agent": "Mozilla/5.0"}
+    )
+    r.raise_for_status()
+    j = r.json()
+
+    names = {
+        "bitcoin": ("BTC", "BITCOIN"),
+        "ethereum": ("ETH", "ETHEREUM"),
+        "tether": ("USDT", "TETHER"),
+        "binancecoin": ("BNB", "BNB"),
+        "solana": ("SOL", "SOLANA"),
+        "ripple": ("XRP", "XRP"),
+        "cardano": ("ADA", "CARDANO"),
+        "dogecoin": ("DOGE", "DOGECOIN"),
+        "polkadot": ("DOT", "POLKADOT"),
+        "tron": ("TRX", "TRON"),
+        "avalanche-2": ("AVAX", "AVALANCHE"),
+        "chainlink": ("LINK", "CHAINLINK"),
+        "shiba-inu": ("SHIB", "SHIBA INU")
+    }
+
+    out = []
+
+    for cid, (sym, name) in names.items():
+        x = j.get(cid, {})
+        price = _tr_num(x.get("usd"))
+        chg = _tr_num(x.get("usd_24h_change"))
+        if price is None:
+            continue
+
+        out.append({
+            "symbol": sym,
+            "name": name,
+            "price": price,
+            "change_pct": chg
+        })
+
+    return out
+
+
+def fetch_bist_full():
+    import requests
+
+    tickers = [
+        "BIST:THYAO","BIST:ASELS","BIST:TUPRS","BIST:EREGL",
+        "BIST:KCHOL","BIST:SISE","BIST:AKBNK","BIST:GARAN",
+        "BIST:YKBNK","BIST:ISCTR","BIST:SAHOL","BIST:FROTO",
+        "BIST:TOASO","BIST:BIMAS","BIST:TCELL","BIST:ENKAI",
+        "BIST:PETKM","BIST:HEKTS","BIST:SASA","BIST:ASTOR",
+        "BIST:ENJSA","BIST:MGROS","BIST:ULKER","BIST:PGSUS",
+        "BIST:ARCLK","BIST:KOZAL","BIST:KRDMD","BIST:TTKOM",
+        "BIST:OYAKC","BIST:VAKBN"
+    ]
+
+    payload = {
+        "symbols": {
+            "tickers": tickers,
+            "query": {"types": []}
+        },
+        "columns": [
+            "name",
+            "description",
+            "close",
+            "change",
+            "volume"
+        ]
+    }
+
+    r = requests.post(
+        "https://scanner.tradingview.com/turkey/scan",
+        json=payload,
+        timeout=15,
+        headers={"User-Agent": "Mozilla/5.0"}
+    )
+    r.raise_for_status()
+    j = r.json()
+
+    out = []
+
+    for item in j.get("data", []):
+        d = item.get("d") or []
+        if len(d) < 5:
+            continue
+
+        out.append({
+            "symbol": d[0],
+            "name": d[1] or d[0],
+            "price": d[2],
+            "change_pct": d[3],
+            "volume": d[4]
+        })
+
+    return out
+
+
+@app.route("/api/piyasa")
+def api_piyasa():
+    import time
+
+    result = {
+        "ok": True,
+        "updated": int(time.time()),
+        "doviz": [],
+        "altin": [],
+        "kripto": [],
+        "borsa": [],
+        "errors": {}
+    }
+
+    try:
+        doviz, altin = fetch_fx_gold_full()
+        result["doviz"] = doviz
+        result["altin"] = altin
+    except Exception as e:
+        result["errors"]["doviz_altin"] = str(e)
+
+    try:
+        result["kripto"] = fetch_crypto_full()
+    except Exception as e:
+        result["errors"]["kripto"] = str(e)
+
+    try:
+        result["borsa"] = fetch_bist_full()
+    except Exception as e:
+        result["errors"]["borsa"] = str(e)
+
+    resp = jsonify(result)
+    resp.headers["Access-Control-Allow-Origin"] = "*"
+    resp.headers["Cache-Control"] = "no-store"
+    return resp
+
+
 HTML = r'''
 <!doctype html>
 <html lang="tr">
