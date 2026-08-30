@@ -396,6 +396,83 @@ def api_stock(symbol):
     }), 404
 
 
+KUR_CACHE = {"data": None, "updated": 0}
+
+def fetch_kurlar():
+    if KUR_CACHE["data"] and time.time() - KUR_CACHE["updated"] < 30:
+        return KUR_CACHE["data"]
+
+    out = {
+        "usd": None,
+        "eur": None,
+        "gram": None,
+        "ceyrek": None,
+        "updated": int(time.time())
+    }
+
+    try:
+        r = requests.get(
+            "https://dolartoday.org/api/rates?symbols=USD,EUR,GA",
+            timeout=10
+        )
+        r.raise_for_status()
+        j = r.json()
+        rates = j.get("rates", {})
+
+        usd = rates.get("USD") or rates.get("usd")
+        eur = rates.get("EUR") or rates.get("eur")
+        ga  = rates.get("GA") or rates.get("ga")
+
+        out["usd"] = usd
+        out["eur"] = eur
+        out["gram"] = ga
+
+    except Exception as e:
+        print("Kur API hatası:", e)
+
+    # Çeyrek altın için anahtarsız public endpoint denemesi.
+    try:
+        r = requests.get(
+            "https://api.apinoktam.erenozdemir.com.tr/public/v1/altin",
+            timeout=10
+        )
+        if r.ok:
+            j = r.json()
+            items = (
+                j.get("data", {}).get("kalemler")
+                or j.get("data")
+                or j.get("kalemler")
+                or []
+            )
+
+            if isinstance(items, list):
+                for x in items:
+                    name = str(
+                        x.get("sembol")
+                        or x.get("tur")
+                        or x.get("name")
+                        or x.get("isim")
+                        or ""
+                    ).lower()
+
+                    if "ceyrek" in name or "çeyrek" in name or name=="cey":
+                        out["ceyrek"] = x
+                        break
+    except Exception as e:
+        print("Çeyrek API hatası:", e)
+
+    KUR_CACHE["data"] = out
+    KUR_CACHE["updated"] = int(time.time())
+    return out
+
+
+@app.route("/api/kurlar")
+def api_kurlar():
+    return jsonify({
+        "ok": True,
+        "data": fetch_kurlar()
+    })
+
 HTML = r'''
 <!doctype html>
 <html lang="tr">
@@ -968,6 +1045,38 @@ placeholder="🔎 Hisse ara: ASELS, THYAO, TUPRS..."
 oninput="renderStocks()">
 </div>
 
+
+<div id="kurBar" style="
+    margin:12px 14px 4px;
+    display:grid;
+    grid-template-columns:repeat(2,1fr);
+    gap:8px">
+
+    <div class="stat">
+        <span>DOLAR / TL</span>
+        <b id="usdKur">-</b>
+        <small id="usdAlt" style="color:#7f8ca0">yükleniyor...</small>
+    </div>
+
+    <div class="stat">
+        <span>EURO / TL</span>
+        <b id="eurKur">-</b>
+        <small id="eurAlt" style="color:#7f8ca0">yükleniyor...</small>
+    </div>
+
+    <div class="stat">
+        <span>GRAM ALTIN</span>
+        <b id="gramKur">-</b>
+        <small id="gramAlt" style="color:#7f8ca0">yükleniyor...</small>
+    </div>
+
+    <div class="stat">
+        <span>ÇEYREK ALTIN</span>
+        <b id="ceyrekKur">-</b>
+        <small id="ceyrekAlt" style="color:#7f8ca0">yükleniyor...</small>
+    </div>
+</div>
+
 <div class="stats">
 <div class="stat">
 <b id="total">-</b>
@@ -1057,6 +1166,46 @@ function money(v){
     if(x>=1e6) return "₺"+(x/1e6).toFixed(1)+" Mn"
     return "₺"+n(x,0)
 }
+
+
+function kurObj(x){
+    if(!x) return {buy:null,sell:null}
+
+    return {
+        buy: x["buy"] ?? x["alis"] ?? null,
+        sell: x["sell"] ?? x["satis"] ?? null
+    }
+}
+
+async function loadKurlar(){
+    try{
+        const r = await fetch("/api/kurlar", {cache:"no-store"})
+        const j = await r.json()
+
+        if(!j.ok) throw new Error("Kur API cevap vermedi")
+
+        const d = j.data || {}
+
+        function yaz(id, altId, veri, basamak){
+            const x = kurObj(veri)
+
+            document.getElementById(id).textContent =
+                x.sell != null ? "₺"+n(x.sell,basamak) : "-"
+
+            document.getElementById(altId).textContent =
+                x.buy != null ? "Alış ₺"+n(x.buy,basamak) : "Alış verisi yok"
+        }
+
+        yaz("usdKur","usdAlt",d.usd,4)
+        yaz("eurKur","eurAlt",d.eur,4)
+        yaz("gramKur","gramAlt",d.gram,2)
+        yaz("ceyrekKur","ceyrekAlt",d.ceyrek,2)
+
+    }catch(e){
+        console.log("Kur hatası:",e)
+    }
+}
+
 
 async function load(){
     try{
@@ -1758,7 +1907,9 @@ function detailTab(tab,el){
 }
 
 load()
+loadKurlar()
 setInterval(load,60000)
+setInterval(loadKurlar,30000)
 
 </script>
 
