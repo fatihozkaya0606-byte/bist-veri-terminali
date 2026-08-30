@@ -551,7 +551,14 @@ def fetch_fx_gold_full():
 
         buy=val(x,"Buying","buying","Alış","alis")
         sell=val(x,"Selling","selling","Satış","satis")
-        chg=val(x,"Change","change","Değişim","degisim")
+        chg=val(
+            x,
+            "Change","change",
+            "ChangePercent","changePercent",
+            "ChangeRate","changeRate",
+            "Rate","rate",
+            "Değişim","degisim"
+        )
 
         if key in fx_symbols:
             doviz.append({
