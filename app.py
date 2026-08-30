@@ -1328,42 +1328,70 @@ function kurObj(x){
 
 async function loadKurlar(){
     try{
-        const r = await fetch("/api/kurlar", {cache:"no-store"})
-        const j = await r.json()
+        const r=await fetch("/api/kurlar",{cache:"no-store"})
+        const j=await r.json()
+        const d=j.data || {}
 
-        if(!j.ok) throw new Error("Kur API cevap vermedi")
-
-        const d = j.data || {}
-
-        function yaz(id, altId, veri, basamak, key){
-            const x = kurObj(veri)
-            const el = document.getElementById(id)
-
-            if(x.sell != null){
-                el.innerHTML =
-                    '<span style="display:flex;align-items:center;gap:7px">' +
-                    '<span>₺'+n(x.sell,basamak)+'</span>' +
-                    yonOku(key, x.sell, el.closest(".stat"))
-                    kurDegisimYaz(key, x.sell) +
-                    '</span>'
-            }else{
-                el.textContent = "-"
+        function val(x,...keys){
+            for(const k of keys){
+                if(x && x[k]!==null && x[k]!==undefined) return Number(x[k])
             }
-
-            document.getElementById(altId).textContent =
-                x.buy != null ? "Alış ₺"+n(x.buy,basamak) : "Alış verisi yok"
+            return null
         }
 
-        yaz("usdKur","usdAlt",d.usd,4,"usd")
-        yaz("eurKur","eurAlt",d.eur,4,"eur")
-        yaz("gramKur","gramAlt",d.gram,2,"gram")
-        yaz("ceyrekKur","ceyrekAlt",d.ceyrek,2,"ceyrek")
+        function yaz(id,altId,x,digit){
+            if(!x) return
+
+            const sell=val(x,"sell","satis","satış")
+            const buy=val(x,"buy","alis","alış")
+
+            let pct=val(
+                x,
+                "degisim_pct",
+                "change_pct",
+                "changePercent",
+                "change_percent",
+                "yuzde"
+            )
+
+            let fark=val(
+                x,
+                "degisim",
+                "change",
+                "fark"
+            )
+
+            let yon="■"
+            let renk="#7f8ca0"
+
+            if(pct!==null){
+                if(pct>0){ yon="▲"; renk="#20d391" }
+                else if(pct<0){ yon="▼"; renk="#ff5c6c" }
+            }else if(fark!==null){
+                if(fark>0){ yon="▲"; renk="#20d391" }
+                else if(fark<0){ yon="▼"; renk="#ff5c6c" }
+            }
+
+            document.getElementById(id).innerHTML=
+                '<span>₺'+n(sell,digit)+'</span> '+
+                '<span style="color:'+renk+
+                ';font-size:13px;font-weight:800;margin-left:6px">'+
+                yon+' '+(pct!==null ? '%'+n(pct,2) : '')+
+                '</span>'
+
+            document.getElementById(altId).textContent=
+                buy!==null ? "Alış ₺"+n(buy,digit) : "Alış verisi yok"
+        }
+
+        yaz("usdKur","usdAlt",d.usd,4)
+        yaz("eurKur","eurAlt",d.eur,4)
+        yaz("gramKur","gramAlt",d.gram,2)
+        yaz("ceyrekKur","ceyrekAlt",d.ceyrek,2)
 
     }catch(e){
-        console.log("Kur hatası:",e)
+        console.log("Kur hatası",e)
     }
 }
-
 
 async function load(){
     try{
