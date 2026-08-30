@@ -1025,6 +1025,36 @@ body{
     font-weight:900;
 }
 
+
+.kurFlashUp{
+    animation:kurUpFlash .8s ease;
+}
+.kurFlashDown{
+    animation:kurDownFlash .8s ease;
+}
+
+@keyframes kurUpFlash{
+    0%{
+        box-shadow:0 0 0 1px rgba(32,211,145,.95),
+                   0 0 22px rgba(32,211,145,.45);
+        border-color:#20d391;
+    }
+    100%{
+        box-shadow:none;
+    }
+}
+
+@keyframes kurDownFlash{
+    0%{
+        box-shadow:0 0 0 1px rgba(255,92,108,.95),
+                   0 0 22px rgba(255,92,108,.45);
+        border-color:#ff5c6c;
+    }
+    100%{
+        box-shadow:none;
+    }
+}
+
 </style>
 </head>
 
@@ -1176,7 +1206,7 @@ const oncekiKur = {
     ceyrek:null
 }
 
-function yonOku(key, yeni){
+function yonOku(key, yeni, kart){
     const eski = oncekiKur[key]
     oncekiKur[key] = yeni
 
@@ -1185,10 +1215,20 @@ function yonOku(key, yeni){
     }
 
     if(Number(yeni) > Number(eski)){
+        if(kart){
+            kart.classList.remove("kurFlashDown")
+            kart.classList.add("kurFlashUp")
+            setTimeout(()=>kart.classList.remove("kurFlashUp"),850)
+        }
         return '<span style="color:#20d391;font-size:20px;font-weight:900">↑</span>'
     }
 
     if(Number(yeni) < Number(eski)){
+        if(kart){
+            kart.classList.remove("kurFlashUp")
+            kart.classList.add("kurFlashDown")
+            setTimeout(()=>kart.classList.remove("kurFlashDown"),850)
+        }
         return '<span style="color:#ff5c6c;font-size:20px;font-weight:900">↓</span>'
     }
 
@@ -1221,7 +1261,7 @@ async function loadKurlar(){
                 el.innerHTML =
                     '<span style="display:flex;align-items:center;gap:7px">' +
                     '<span>₺'+n(x.sell,basamak)+'</span>' +
-                    yonOku(key, x.sell) +
+                    yonOku(key, x.sell, el.closest(".stat")) +
                     '</span>'
             }else{
                 el.textContent = "-"
