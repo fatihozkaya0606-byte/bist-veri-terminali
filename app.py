@@ -1056,6 +1056,47 @@ body{
 }
 
 </style>
+
+<style>
+.mobileBottomNav{
+    position:fixed;
+    left:0;
+    right:0;
+    bottom:0;
+    z-index:9999;
+    height:64px;
+    padding:6px 8px max(6px,env(safe-area-inset-bottom));
+    background:#0b111a;
+    border-top:1px solid #202c3a;
+    display:grid;
+    grid-template-columns:repeat(4,1fr);
+    gap:5px;
+}
+.mobileBottomNav button{
+    border:0;
+    background:transparent;
+    color:#8591a3;
+    font-size:12px;
+    font-weight:600;
+    border-radius:10px;
+    padding:5px 2px;
+}
+.mobileBottomNav button b{
+    display:block;
+    color:#dce5f2;
+    font-size:18px;
+    line-height:20px;
+    margin-bottom:2px;
+}
+.mobileBottomNav button.active{
+    color:#2684ff;
+    background:#111c2b;
+}
+.mobileBottomNav button.active b{color:#2684ff}
+body{padding-bottom:76px!important;}
+.bottom{bottom:64px!important;}
+</style>
+
 </head>
 
 <body>
@@ -1984,8 +2025,44 @@ function detailTab(tab,el){
 load()
 loadKurlar()
 setInterval(load,60000)
-setInterval(loadKurlar, 5000)
+setInterval(loadKurlar, 1000)
 
+</script>
+
+
+<div class="mobileBottomNav" id="mobileBottomNav">
+ <button class="active" onclick="bottomGo('all',this)"><b>⌂</b>Ana Sayfa</button>
+ <button onclick="bottomGo('strong',this)"><b>⚡</b>Sinyaller</button>
+ <button onclick="bottomGo('strong',this)"><b>★</b>Güçlü</button>
+ <button onclick="bottomGo('volume',this)"><b>▥</b>Hacim</button>
+</div>
+
+<script>
+function bottomGo(type,el){
+  document.querySelectorAll('#mobileBottomNav button').forEach(x=>x.classList.remove('active'));
+  el.classList.add('active');
+
+  const map={
+    all:'all',
+    strong:'strong',
+    volume:'volume'
+  };
+
+  const wanted=map[type] || 'all';
+
+  // Mevcut üst filtre butonunu kullan
+  const buttons=[...document.querySelectorAll('button')];
+  const names={
+    all:'Tüm BIST',
+    strong:'Güçlü',
+    volume:'Hacim'
+  };
+  const target=buttons.find(b=>b.textContent.trim()===names[wanted]);
+  if(target){
+    target.click();
+    window.scrollTo({top:0,behavior:'smooth'});
+  }
+}
 </script>
 
 </body>
