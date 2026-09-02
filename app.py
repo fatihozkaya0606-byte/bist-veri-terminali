@@ -9,6 +9,7 @@ import random
 import string
 
 app = Flask(__name__)
+APP_VERSION = "6.0-PRO"
 
 TV_URL = "https://scanner.tradingview.com/turkey/scan"
 
@@ -26,6 +27,42 @@ CACHE = {
 
 LIVE_CACHE = {}
 LIVE_LOCK = threading.Lock()
+
+# Halka acik fiyat/hacim verisinden uretilen OLASI kurumsal hareket esikleri.
+# Bu modul gercek MKK virman kaydi veya kurum isimleri uretmez.
+VIRMAN_MIN_RELATIVE_VOLUME = 2.50
+VIRMAN_MIN_TRANSACTION_TL = 50_000_000
+VIRMAN_MIN_ABNORMAL_TL = 25_000_000
+VIRMAN_MIN_SCORE = 70
+VIRMAN_ALERT_COOLDOWN = 3 * 60 * 60
+VIRMAN_MAX_TELEGRAM = 5
+
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()
+
+VIRMAN_LAST_SENT = {}
+VIRMAN_ALERT_LOCK = threading.Lock()
+
+# Lisansli canli AKD / Takas saglayicisi icin genel REST baglantisi.
+# Ornek URL: https://saglayici.example/akd/{symbol}
+AKD_API_URL = os.getenv("AKD_API_URL", "").strip()
+TAKAS_API_URL = os.getenv("TAKAS_API_URL", "").strip()
+MARKET_DATA_API_KEY = os.getenv("MARKET_DATA_API_KEY", "").strip()
+MARKET_DATA_API_HEADER = os.getenv(
+    "MARKET_DATA_API_HEADER", "Authorization"
+).strip()
+MARKET_DATA_API_PREFIX = os.getenv(
+    "MARKET_DATA_API_PREFIX", "Bearer"
+).strip()
+AKD_SYMBOL_PARAM = os.getenv("AKD_SYMBOL_PARAM", "symbol").strip()
+AKD_PROVIDER_NAME = os.getenv("AKD_PROVIDER_NAME", "Lisanslı veri sağlayıcı").strip()
+AKD_CACHE_SECONDS = max(1, int(os.getenv("AKD_CACHE_SECONDS", "5")))
+VIRMAN_MIN_TRANSFER_LOT = max(
+    1, int(os.getenv("VIRMAN_MIN_TRANSFER_LOT", "100000"))
+)
+
+PRO_DATA_CACHE = {}
+PRO_DATA_LOCK = threading.Lock()
 
 COLUMNS = [
     "name",
@@ -116,6 +153,150 @@ def sinyal_adi(score):
     return "ZAYIF"
 
 
+def sayi(value, default=0.0):
+    try:
+        if value is None:
+            return default
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def virman_analizi(s):
+    """Fiyat/hacim verisinden olasi kurumsal hareket skoru uretir."""
+    price = sayi(s.get("price"))
+    volume = sayi(s.get("volume"))
+    relative_volume = sayi(s.get("relative_volume"))
+    change = sayi(s.get("change"))
+    ema20 = sayi(s.get("ema20"))
+    macd = sayi(s.get("macd"))
+    macd_signal = sayi(s.get("macd_signal"))
+
+    transaction_value = max(0.0, price * volume)
+    normal_volume = volume / relative_volume if relative_volume > 0 else volume
+    abnormal_volume = max(0.0, volume - normal_volume)
+    abnormal_value = max(0.0, price * abnormal_volume)
+
+    score = 0
+    reasons = []
+
+    if relative_volume >= 6:
+        score += 35
+        reasons.append("Göreli hacim 6x ve üzerinde")
+    elif relative_volume >= 4:
+        score += 32
+        reasons.append("Göreli hacim 4x ve üzerinde")
+    elif relative_volume >= 3:
+        score += 28
+        reasons.append("Göreli hacim 3x ve üzerinde")
+    elif relative_volume >= VIRMAN_MIN_RELATIVE_VOLUME:
+        score += 24
+        reasons.append("Göreli hacim 2,5x ve üzerinde")
+
+    if abnormal_value >= 1_000_000_000:
+        score += 30
+        reasons.append("Normal üstü hacim 1 milyar TL üzerinde")
+    elif abnormal_value >= 500_000_000:
+        score += 27
+        reasons.append("Normal üstü hacim 500 milyon TL üzerinde")
+    elif abnormal_value >= 200_000_000:
+        score += 23
+        reasons.append("Normal üstü hacim 200 milyon TL üzerinde")
+    elif abnormal_value >= 100_000_000:
+        score += 20
+        reasons.append("Normal üstü hacim 100 milyon TL üzerinde")
+    elif abnormal_value >= 50_000_000:
+        score += 16
+        reasons.append("Normal üstü hacim 50 milyon TL üzerinde")
+    elif abnormal_value >= VIRMAN_MIN_ABNORMAL_TL:
+        score += 12
+        reasons.append("Normal üstü hacim 25 milyon TL üzerinde")
+
+    if transaction_value >= 2_000_000_000:
+        score += 15
+        reasons.append("İşlem büyüklüğü 2 milyar TL üzerinde")
+    elif transaction_value >= 1_000_000_000:
+        score += 13
+        reasons.append("İşlem büyüklüğü 1 milyar TL üzerinde")
+    elif transaction_value >= 500_000_000:
+        score += 11
+        reasons.append("İşlem büyüklüğü 500 milyon TL üzerinde")
+    elif transaction_value >= 200_000_000:
+        score += 9
+        reasons.append("İşlem büyüklüğü 200 milyon TL üzerinde")
+    elif transaction_value >= VIRMAN_MIN_TRANSACTION_TL:
+        score += 7
+        reasons.append("İşlem büyüklüğü 50 milyon TL üzerinde")
+
+    bullish = (
+        change >= 0.25
+        and price > 0
+        and ema20 > 0
+        and price > ema20
+        and macd > macd_signal
+    )
+    bearish = (
+        change <= -0.25
+        and price > 0
+        and ema20 > 0
+        and price < ema20
+        and macd < macd_signal
+    )
+    quiet_big_volume = abs(change) <= 0.60 and relative_volume >= 3
+
+    if bullish:
+        score += 20
+        direction = "ALIM YÖNLÜ OLASI TOPLAMA"
+        reasons.append("Fiyat, EMA20 ve MACD alım yönünü destekliyor")
+    elif bearish:
+        score += 20
+        direction = "SATIŞ YÖNLÜ OLASI DAĞITIM"
+        reasons.append("Fiyat, EMA20 ve MACD satış yönünü destekliyor")
+    elif quiet_big_volume:
+        score += 16
+        direction = "YÖNÜ BELİRSİZ BÜYÜK HACİM"
+        reasons.append("Yüksek hacme rağmen fiyat hareketi sınırlı")
+    elif change > 0:
+        score += 10
+        direction = "ALIM YÖNLÜ İZLE"
+    elif change < 0:
+        score += 10
+        direction = "SATIŞ YÖNLÜ İZLE"
+    else:
+        score += 7
+        direction = "YÖN BELİRSİZ"
+
+    score = max(0, min(100, int(round(score))))
+    candidate = (
+        relative_volume >= VIRMAN_MIN_RELATIVE_VOLUME
+        and transaction_value >= VIRMAN_MIN_TRANSACTION_TL
+        and abnormal_value >= VIRMAN_MIN_ABNORMAL_TL
+        and score >= VIRMAN_MIN_SCORE
+        and abs(change) <= 6
+    )
+
+    if score >= 85:
+        level = "ÇOK GÜÇLÜ ADAY"
+    elif score >= VIRMAN_MIN_SCORE:
+        level = "GÜÇLÜ ADAY"
+    elif score >= 55:
+        level = "İZLE"
+    else:
+        level = "NORMAL"
+
+    return {
+        "candidate": candidate,
+        "score": score,
+        "level": level,
+        "direction": direction,
+        "transaction_value": int(transaction_value),
+        "normal_volume": int(max(0.0, normal_volume)),
+        "abnormal_volume": int(abnormal_volume),
+        "abnormal_value": int(abnormal_value),
+        "reasons": reasons
+    }
+
+
 def fetch_market():
     payload = {
         "filter": [
@@ -165,6 +346,7 @@ def fetch_market():
 
         stock["score"] = puanla(stock)
         stock["signal"] = sinyal_adi(stock["score"])
+        stock["institutional"] = virman_analizi(stock)
 
         stocks.append(stock)
 
@@ -182,6 +364,254 @@ def get_market():
             print("Veri hatası:", e)
 
     return CACHE["stocks"]
+
+
+def ilk_deger(row, names, default=None):
+    if not isinstance(row, dict):
+        return default
+    lowered = {str(k).lower(): v for k, v in row.items()}
+    for name in names:
+        if name in row and row[name] is not None:
+            return row[name]
+        value = lowered.get(str(name).lower())
+        if value is not None:
+            return value
+    return default
+
+
+def veri_satirlari(payload, depth=0):
+    if isinstance(payload, list):
+        return payload
+    if not isinstance(payload, dict) or depth > 3:
+        return []
+
+    for key in (
+        "institutions", "brokers", "rows", "items", "data",
+        "result", "results", "records", "takas", "akd"
+    ):
+        value = ilk_deger(payload, [key])
+        if isinstance(value, list):
+            return value
+        if isinstance(value, dict):
+            nested = veri_satirlari(value, depth + 1)
+            if nested:
+                return nested
+    return []
+
+
+def kurum_adi(row):
+    value = ilk_deger(row, [
+        "institution", "institution_name", "broker", "broker_name",
+        "name", "kurum", "kurum_adi", "kurumAdi", "araci_kurum"
+    ], "")
+    return str(value or "").strip()
+
+
+def akd_normalize(payload):
+    rows = []
+    for raw in veri_satirlari(payload):
+        name = kurum_adi(raw)
+        if not name:
+            continue
+
+        buy = sayi(ilk_deger(raw, [
+            "buy", "buy_lot", "buy_lots", "buyLot", "alis", "alış",
+            "alis_lot", "alisLot"
+        ]))
+        sell = sayi(ilk_deger(raw, [
+            "sell", "sell_lot", "sell_lots", "sellLot", "satis", "satış",
+            "satis_lot", "satisLot"
+        ]))
+        net_raw = ilk_deger(raw, [
+            "net", "net_lot", "net_lots", "netLot", "net_adet", "netAdet"
+        ])
+        net = sayi(net_raw, buy - sell) if net_raw is not None else buy - sell
+        net_tl = sayi(ilk_deger(raw, [
+            "net_tl", "net_value", "netValue", "net_tutar", "netTutar"
+        ]))
+        avg = sayi(ilk_deger(raw, [
+            "average", "average_price", "avg_price", "avgPrice",
+            "ortalama", "ortalama_fiyat"
+        ]))
+
+        rows.append({
+            "institution": name,
+            "buy": int(buy),
+            "sell": int(sell),
+            "net": int(net),
+            "net_tl": int(net_tl),
+            "average": avg
+        })
+
+    rows.sort(key=lambda x: abs(x["net"]), reverse=True)
+    return rows
+
+
+def takas_normalize(payload):
+    rows = []
+    for raw in veri_satirlari(payload):
+        name = kurum_adi(raw)
+        if not name:
+            continue
+
+        holding = sayi(ilk_deger(raw, [
+            "holding", "balance", "quantity", "lot", "lots", "adet",
+            "bakiye", "saklama"
+        ]))
+        change = sayi(ilk_deger(raw, [
+            "change", "change_lot", "changeLot", "difference", "diff",
+            "degisim", "değişim", "fark", "net_change"
+        ]))
+        percent = sayi(ilk_deger(raw, [
+            "percent", "percentage", "share", "ratio", "oran", "pay"
+        ]))
+
+        rows.append({
+            "institution": name,
+            "holding": int(holding),
+            "change": int(change),
+            "percent": percent
+        })
+
+    rows.sort(key=lambda x: abs(x["change"]), reverse=True)
+    return rows
+
+
+def provider_headers():
+    headers = {
+        "Accept": "application/json",
+        "User-Agent": "BIST-Veri-Terminali/6.0"
+    }
+    if MARKET_DATA_API_KEY:
+        value = MARKET_DATA_API_KEY
+        if MARKET_DATA_API_PREFIX:
+            value = f"{MARKET_DATA_API_PREFIX} {value}"
+        headers[MARKET_DATA_API_HEADER] = value
+    return headers
+
+
+def professional_data(kind, symbol, force=False):
+    symbol = symbol.upper().strip()
+    url_template = AKD_API_URL if kind == "akd" else TAKAS_API_URL
+    cache_key = f"{kind}:{symbol}"
+
+    if not url_template:
+        return {
+            "ok": False,
+            "configured": False,
+            "rows": [],
+            "error": "Lisanslı veri bağlantısı henüz tanımlanmadı."
+        }
+
+    with PRO_DATA_LOCK:
+        old = PRO_DATA_CACHE.get(cache_key)
+        if (
+            not force
+            and old
+            and time.time() - old.get("cached_at", 0) < AKD_CACHE_SECONDS
+        ):
+            return old
+
+    try:
+        params = None
+        if "{symbol}" in url_template:
+            url = url_template.replace("{symbol}", symbol)
+        else:
+            url = url_template
+            params = {AKD_SYMBOL_PARAM: symbol}
+
+        response = requests.get(
+            url,
+            params=params,
+            headers=provider_headers(),
+            timeout=12
+        )
+        response.raise_for_status()
+        payload = response.json()
+        rows = akd_normalize(payload) if kind == "akd" else takas_normalize(payload)
+
+        result = {
+            "ok": True,
+            "configured": True,
+            "provider": AKD_PROVIDER_NAME,
+            "symbol": symbol,
+            "rows": rows,
+            "updated": int(time.time()),
+            "cached_at": time.time()
+        }
+    except Exception as exc:
+        result = {
+            "ok": False,
+            "configured": True,
+            "provider": AKD_PROVIDER_NAME,
+            "symbol": symbol,
+            "rows": [],
+            "error": f"Veri sağlayıcı hatası: {type(exc).__name__}",
+            "updated": int(time.time()),
+            "cached_at": time.time()
+        }
+
+    with PRO_DATA_LOCK:
+        PRO_DATA_CACHE[cache_key] = result
+    return result
+
+
+def kurum_key(name):
+    return "".join(ch for ch in str(name).upper() if ch.isalnum())
+
+
+def gercek_veriden_virman_eslestir(akd_rows, takas_rows):
+    """AKD ile açıklanamayan, birbirine yakın takas giriş/çıkışlarını eşler."""
+    akd_net = {kurum_key(x["institution"]): sayi(x.get("net")) for x in akd_rows}
+    incoming = [x for x in takas_rows if sayi(x.get("change")) >= VIRMAN_MIN_TRANSFER_LOT]
+    outgoing = [x for x in takas_rows if sayi(x.get("change")) <= -VIRMAN_MIN_TRANSFER_LOT]
+    matches = []
+
+    for source in outgoing:
+        out_lot = abs(sayi(source.get("change")))
+        for target in incoming:
+            in_lot = abs(sayi(target.get("change")))
+            biggest = max(out_lot, in_lot)
+            if biggest <= 0:
+                continue
+
+            difference_pct = abs(out_lot - in_lot) / biggest * 100
+            if difference_pct > 3:
+                continue
+
+            source_akd = abs(akd_net.get(kurum_key(source["institution"]), 0))
+            target_akd = abs(akd_net.get(kurum_key(target["institution"]), 0))
+            explained_by_market = (
+                source_akd >= out_lot * 0.50
+                or target_akd >= in_lot * 0.50
+            )
+
+            score = 50
+            score += max(0, int(20 - difference_pct * 5))
+            if biggest >= 5_000_000:
+                score += 15
+            elif biggest >= 1_000_000:
+                score += 11
+            elif biggest >= 500_000:
+                score += 7
+            else:
+                score += 4
+            if not explained_by_market:
+                score += 15
+
+            score = min(100, score)
+            matches.append({
+                "from": source["institution"],
+                "to": target["institution"],
+                "lot": int((out_lot + in_lot) / 2),
+                "difference_percent": round(difference_pct, 2),
+                "score": score,
+                "market_explained": explained_by_market,
+                "label": "OLASI VİRMAN" if score >= 75 else "KONTROL ET"
+            })
+
+    matches.sort(key=lambda x: (x["score"], x["lot"]), reverse=True)
+    return matches[:10]
 
 
 def tv_sid(prefix):
@@ -355,11 +785,92 @@ def fetch_live_quote(symbol, wait_seconds=4):
             except:
                 pass
 
+
+def tl_yaz(value):
+    value = sayi(value)
+    if value >= 1_000_000_000:
+        return f"{value / 1_000_000_000:.2f} milyar TL"
+    if value >= 1_000_000:
+        return f"{value / 1_000_000:.1f} milyon TL"
+    return f"{value:,.0f} TL"
+
+
+def virman_telegram_alarmlari(stocks):
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        return []
+
+    now = time.time()
+    candidates = sorted(
+        [
+            s for s in stocks
+            if s.get("institutional", {}).get("candidate")
+        ],
+        key=lambda s: (
+            s.get("institutional", {}).get("score", 0),
+            s.get("institutional", {}).get("abnormal_value", 0)
+        ),
+        reverse=True
+    )
+
+    with VIRMAN_ALERT_LOCK:
+        fresh = [
+            s for s in candidates
+            if now - VIRMAN_LAST_SENT.get(s.get("symbol", ""), 0)
+            >= VIRMAN_ALERT_COOLDOWN
+        ][:VIRMAN_MAX_TELEGRAM]
+
+    if not fresh:
+        return []
+
+    lines = [
+        "⚠️ OLASI KURUMSAL / VİRMAN RADARI",
+        ""
+    ]
+    for stock in fresh:
+        info = stock["institutional"]
+        lines.extend([
+            f"📌 {stock['symbol']} — {info['score']}/100",
+            f"{info['direction']}",
+            f"Fiyat: {sayi(stock.get('price')):.2f} TL | "
+            f"Değişim: %{sayi(stock.get('change')):+.2f}",
+            f"Göreli hacim: {sayi(stock.get('relative_volume')):.2f}x",
+            f"İşlem: {tl_yaz(info['transaction_value'])}",
+            f"Normal üstü: {tl_yaz(info['abnormal_value'])}",
+            ""
+        ])
+
+    lines.extend([
+        "Bu bildirim halka açık piyasa verisinden üretilen tahmindir.",
+        "Gerçek virman teyidi için lisanslı AKD + T+2 takas gerekir.",
+        "Yatırım tavsiyesi değildir."
+    ])
+
+    try:
+        response = requests.post(
+            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+            data={"chat_id": TELEGRAM_CHAT_ID, "text": "\n".join(lines)},
+            timeout=15
+        )
+        response.raise_for_status()
+    except Exception as exc:
+        print("Virman Telegram hatası:", type(exc).__name__)
+        return []
+
+    sent = []
+    with VIRMAN_ALERT_LOCK:
+        for stock in fresh:
+            symbol = stock.get("symbol", "")
+            if symbol:
+                VIRMAN_LAST_SENT[symbol] = now
+                sent.append(symbol)
+    return sent
+
 def background_loop():
     while True:
         try:
-            fetch_market()
+            stocks = fetch_market()
             print("BIST verileri güncellendi:", len(CACHE["stocks"]))
+            virman_telegram_alarmlari(stocks)
         except Exception as e:
             print("Arka plan veri hatası:", e)
 
@@ -368,11 +879,106 @@ def background_loop():
 
 @app.route("/api/market")
 def api_market():
+    stocks = get_market()
     return jsonify({
         "ok": True,
-        "count": len(get_market()),
-        "stocks": get_market(),
+        "count": len(stocks),
+        "virman_count": sum(
+            1 for s in stocks if s.get("institutional", {}).get("candidate")
+        ),
+        "stocks": stocks,
         "updated": CACHE["updated"]
+    })
+
+
+@app.route("/api/virman")
+def api_virman():
+    candidates = [
+        s for s in get_market()
+        if s.get("institutional", {}).get("candidate")
+    ]
+    candidates.sort(
+        key=lambda s: (
+            s.get("institutional", {}).get("score", 0),
+            s.get("institutional", {}).get("abnormal_value", 0)
+        ),
+        reverse=True
+    )
+    return jsonify({
+        "ok": True,
+        "count": len(candidates),
+        "candidates": candidates,
+        "real_virman": False,
+        "note": (
+            "Halka açık fiyat ve hacim verisinden üretilen olası kurumsal "
+            "hareket tahminidir; gerçek MKK virman kaydı değildir."
+        ),
+        "updated": CACHE["updated"]
+    })
+
+
+def public_provider_result(result):
+    return {k: v for k, v in result.items() if k != "cached_at"}
+
+
+@app.route("/api/pro-status")
+def api_pro_status():
+    return jsonify({
+        "ok": True,
+        "akd_configured": bool(AKD_API_URL),
+        "takas_configured": bool(TAKAS_API_URL),
+        "provider": AKD_PROVIDER_NAME if (AKD_API_URL or TAKAS_API_URL) else None,
+        "estimated_radar": True,
+        "real_virman_requires_both": True
+    })
+
+
+@app.route("/api/akd/<symbol>")
+def api_akd(symbol):
+    result = public_provider_result(professional_data("akd", symbol))
+    result["real_akd"] = bool(result.get("ok") and result.get("rows"))
+    return jsonify(result)
+
+
+@app.route("/api/takas/<symbol>")
+def api_takas(symbol):
+    result = public_provider_result(professional_data("takas", symbol))
+    result["real_takas"] = bool(result.get("ok") and result.get("rows"))
+    return jsonify(result)
+
+
+@app.route("/api/virman-check/<symbol>")
+def api_virman_check(symbol):
+    akd = professional_data("akd", symbol)
+    takas = professional_data("takas", symbol)
+
+    if not akd.get("ok") or not takas.get("ok"):
+        return jsonify({
+            "ok": False,
+            "configured": bool(AKD_API_URL and TAKAS_API_URL),
+            "symbol": symbol.upper().strip(),
+            "matches": [],
+            "akd_error": akd.get("error"),
+            "takas_error": takas.get("error"),
+            "note": "Gerçek karşılaştırma için hem AKD hem takas bağlantısı gerekir."
+        })
+
+    matches = gercek_veriden_virman_eslestir(
+        akd.get("rows", []), takas.get("rows", [])
+    )
+    return jsonify({
+        "ok": True,
+        "configured": True,
+        "symbol": symbol.upper().strip(),
+        "matches": matches,
+        "count": len(matches),
+        "provider": AKD_PROVIDER_NAME,
+        "note": (
+            "AKD ile açıklanamayan, birbirine yakın takas giriş ve çıkışları "
+            "eşleştirilmiştir. Sonuç olası virman işaretidir; kesin yatırımcı "
+            "kimliği göstermez."
+        ),
+        "updated": int(time.time())
     })
 
 
@@ -387,7 +993,9 @@ def api_stock(symbol):
                 "stock": s,
                 "realtime_depth": False,
                 "real_akd": False,
-                "real_takas": False
+                "real_takas": False,
+                "real_virman": False,
+                "estimated_institutional_movement": True
             })
 
     return jsonify({
@@ -723,7 +1331,7 @@ HTML = r'''
 <meta name="viewport"
 content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
 
-<title>BIST Veri Terminali</title>
+<title>BIST Veri Terminali PRO</title>
 
 <script src="https://telegram.org/js/telegram-web-app.js"></script>
 
@@ -780,7 +1388,7 @@ body{
 
 .stats{
     display:grid;
-    grid-template-columns:repeat(3,1fr);
+    grid-template-columns:repeat(4,1fr);
     gap:8px;
     padding:12px 14px 5px;
 }
@@ -835,6 +1443,80 @@ body{
     border:1px solid #192434;
     border-radius:15px;
     cursor:pointer;
+}
+
+.stock.virmanCandidate{
+    border-color:#7b5b18;
+    box-shadow:0 0 0 1px rgba(245,187,61,.08);
+}
+
+.virmanTag{
+    margin-top:10px;
+    padding:8px 10px;
+    border-radius:9px;
+    background:#2b210d;
+    border:1px solid #6d5015;
+    color:#ffd36d;
+    font-size:11px;
+    font-weight:800;
+}
+
+.virmanTag.buy{
+    background:#0e2a20;
+    border-color:#175b44;
+    color:#39dfa4;
+}
+
+.virmanTag.sell{
+    background:#2b1117;
+    border-color:#6b2635;
+    color:#ff7487;
+}
+
+.providerBadge{
+    display:inline-block;
+    margin-bottom:10px;
+    padding:6px 9px;
+    border-radius:8px;
+    background:#102947;
+    border:1px solid #1f5590;
+    color:#82baff;
+    font-size:11px;
+    font-weight:800;
+}
+
+.dataTableWrap{
+    overflow:auto;
+    border-radius:12px;
+    border:1px solid #1a2636;
+}
+
+.dataTable{
+    width:100%;
+    min-width:560px;
+    border-collapse:collapse;
+    background:#0d141e;
+}
+
+.dataTable th,
+.dataTable td{
+    padding:10px 8px;
+    border-bottom:1px solid #1a2636;
+    text-align:right;
+    font-size:12px;
+}
+
+.dataTable th:first-child,
+.dataTable td:first-child{
+    text-align:left;
+}
+
+.dataTable th{
+    color:#8290a8;
+    font-size:10px;
+    position:sticky;
+    top:0;
+    background:#111a26;
 }
 
 .stockTop{
@@ -1311,7 +1993,7 @@ body{
     background:#0b111a;
     border-top:1px solid #202c3a;
     display:grid;
-    grid-template-columns:repeat(4,1fr);
+    grid-template-columns:repeat(5,1fr);
     gap:5px;
 }
 .mobileBottomNav button{
@@ -1348,8 +2030,8 @@ body{padding-bottom:76px!important;}
 <div id="home">
 
 <div class="top">
-<div class="title">BIST Veri Terminali</div>
-<div class="sub">Piyasa • Teknik • Sinyal • AKD • Takas • AI</div>
+<div class="title">BIST Veri Terminali <span style="font-size:11px;color:#64a5ff">PRO</span></div>
+<div class="sub">Piyasa • Teknik • Sinyal • Canlı AKD • Takas • Virman • AI</div>
 
 <input
 id="search"
@@ -1409,6 +2091,11 @@ oninput="renderStocks()">
 <b id="strong">-</b>
 <span>Güçlü Sinyal</span>
 </div>
+
+<div class="stat">
+<b id="virmanCount">-</b>
+<span>Virman Adayı</span>
+</div>
 </div>
 
 <div class="tabs">
@@ -1417,6 +2104,7 @@ oninput="renderStocks()">
 <button onclick="setFilter('up',this)">Yükselen</button>
 <button onclick="setFilter('down',this)">Düşen</button>
 <button onclick="setFilter('volume',this)">Hacim</button>
+<button onclick="setFilter('virman',this)">Virman</button>
 </div>
 
 <div id="list" class="list">
@@ -1445,6 +2133,7 @@ oninput="renderStocks()">
 <button onclick="detailTab('akd',this)">AKD</button>
 <button onclick="detailTab('kademe',this)">KADEME</button>
 <button onclick="detailTab('takas',this)">TAKAS</button>
+<button onclick="detailTab('virman',this)">VİRMAN</button>
 <button onclick="detailTab('signals',this)">SİNYALLER</button>
 </div>
 
@@ -1482,6 +2171,15 @@ function money(v){
     if(x>=1e9) return "₺"+(x/1e9).toFixed(2)+" Mr"
     if(x>=1e6) return "₺"+(x/1e6).toFixed(1)+" Mn"
     return "₺"+n(x,0)
+}
+
+function esc(v){
+    return String(v??"")
+        .replaceAll("&","&amp;")
+        .replaceAll("<","&lt;")
+        .replaceAll(">","&gt;")
+        .replaceAll('"',"&quot;")
+        .replaceAll("'","&#039;")
 }
 
 
@@ -1653,6 +2351,9 @@ async function load(){
         document.getElementById("strong").textContent=
             allStocks.filter(x=>x.score>=110).length
 
+        document.getElementById("virmanCount").textContent=
+            allStocks.filter(x=>x.institutional&&x.institutional.candidate).length
+
         renderStocks()
     }catch(e){
         document.getElementById("list").innerHTML=
@@ -1696,22 +2397,44 @@ function renderStocks(){
     if(filter==="volume")
         arr.sort((a,b)=>(b.relative_volume||0)-(a.relative_volume||0))
 
+    if(filter==="virman")
+        arr=arr
+            .filter(x=>x.institutional&&x.institutional.candidate)
+            .sort((a,b)=>(b.institutional.score||0)-(a.institutional.score||0))
+
     if(!q && filter==="all")
         arr=arr.slice(0,150)
 
     const list=document.getElementById("list")
 
     if(!arr.length){
-        list.innerHTML='<div class="loading">Hisse bulunamadı.</div>'
+        list.innerHTML=filter==="virman"
+            ? '<div class="warning">Şu anda belirlenen güçlü eşikleri geçen virman/kurumsal hareket adayı yok.</div>'
+            : '<div class="loading">Hisse bulunamadı.</div>'
         return
     }
 
     list.innerHTML=arr.map(s=>{
 
         let cls=(s.change||0)>=0 ? "green":"red"
+        const v=s.institutional||{}
+        const vClass=(v.direction||"").includes("SATIŞ") ? "sell":"buy"
+        const candidateClass=v.candidate ? " virmanCandidate":""
+        const normalMetrics=`
+            <div class="small"><span>RSI</span><b>${n(s.rsi,1)}</b></div>
+            <div class="small"><span>Rel. Hacim</span><b>${n(s.relative_volume,2)}x</b></div>
+            <div class="small"><span>Skor</span><b>${s.score}/150</b></div>
+            <div class="small"><span>Sinyal</span><b>${s.signal}</b></div>
+        `
+        const virmanMetrics=`
+            <div class="small"><span>Kurumsal Skor</span><b>${v.score||0}/100</b></div>
+            <div class="small"><span>Rel. Hacim</span><b>${n(s.relative_volume,2)}x</b></div>
+            <div class="small"><span>İşlem</span><b>${money(v.transaction_value)}</b></div>
+            <div class="small"><span>Normal Üstü</span><b>${money(v.abnormal_value)}</b></div>
+        `
 
         return `
-        <div class="stock" onclick='openDetail(${JSON.stringify(s.symbol)})'>
+        <div class="stock${candidateClass}" onclick='openDetail(${JSON.stringify(s.symbol)})'>
 
         <div class="stockTop">
 
@@ -1727,28 +2450,10 @@ function renderStocks(){
 
         </div>
 
+        ${v.candidate ? `<div class="virmanTag ${vClass}">⚠ ${v.direction} • ${v.score}/100</div>` : ""}
+
         <div class="smallgrid">
-
-        <div class="small">
-        <span>RSI</span>
-        <b>${n(s.rsi,1)}</b>
-        </div>
-
-        <div class="small">
-        <span>Rel. Hacim</span>
-        <b>${n(s.relative_volume,2)}x</b>
-        </div>
-
-        <div class="small">
-        <span>Skor</span>
-        <b>${s.score}/150</b>
-        </div>
-
-        <div class="small">
-        <span>Sinyal</span>
-        <b>${s.signal}</b>
-        </div>
-
+        ${filter==="virman" ? virmanMetrics : normalMetrics}
         </div>
 
         </div>
@@ -1788,15 +2493,17 @@ async function openDetail(symbol){
 
 let depthTimer = null;
 
-async function loadDepth(symbol){
+async function loadDepth(symbol,silent=false){
 
     const p=document.getElementById("panel")
 
-    p.innerHTML=`
-    <div class="loading">
-    Derinlik verisi alınıyor...
-    </div>
-    `
+    if(!silent){
+        p.innerHTML=`
+        <div class="loading">
+        Derinlik verisi alınıyor...
+        </div>
+        `
+    }
 
     try{
 
@@ -1937,11 +2644,13 @@ async function loadDepth(symbol){
 
     }catch(e){
 
-        p.innerHTML=`
-        <div class="warning">
-        Derinlik verisi şu anda alınamadı.
-        </div>
-        `
+        if(!silent){
+            p.innerHTML=`
+            <div class="warning">
+            Derinlik verisi şu anda alınamadı.
+            </div>
+            `
+        }
     }
 }
 
@@ -2030,12 +2739,202 @@ async function loadLive(symbol){
 }
 
 
+async function loadAkd(symbol,silent=false){
+    const p=document.getElementById("panel")
+    if(!silent) p.innerHTML='<div class="loading">Canlı AKD verisi alınıyor...</div>'
+
+    try{
+        const r=await fetch("/api/akd/"+encodeURIComponent(symbol),{cache:"no-store"})
+        const j=await r.json()
+
+        if(!j.configured){
+            p.innerHTML=`
+            <div class="card"><h3>Canlı Aracı Kurum Dağılımı — AKD</h3></div>
+            <div class="locked">
+            Canlı AKD ekranı hazır; fakat lisanslı veri bağlantısı henüz tanımlanmadı.
+            Kurum adı, alış, satış ve net lot yalnızca resmî API bağlandığında gösterilir.
+            </div>`
+            return
+        }
+
+        if(!j.ok) throw new Error(j.error||"AKD alınamadı")
+        const rows=j.rows||[]
+        if(!rows.length){
+            p.innerHTML='<div class="warning">Sağlayıcı bağlantısı açık fakat bu hisse için AKD satırı dönmedi.</div>'
+            return
+        }
+
+        const netBuy=rows.filter(x=>(x.net||0)>0).reduce((a,x)=>a+Number(x.net||0),0)
+        const netSell=Math.abs(rows.filter(x=>(x.net||0)<0).reduce((a,x)=>a+Number(x.net||0),0))
+        const table=rows.slice(0,30).map(x=>`
+            <tr>
+                <td>${esc(x.institution)}</td>
+                <td class="green">${n(x.buy,0)}</td>
+                <td class="red">${n(x.sell,0)}</td>
+                <td class="${Number(x.net)>=0?'green':'red'}">${Number(x.net)>=0?'+':''}${n(x.net,0)}</td>
+                <td>${money(x.net_tl)}</td>
+                <td>${x.average?('₺'+n(x.average,3)):'-'}</td>
+            </tr>`).join("")
+
+        p.innerHTML=`
+        <div class="providerBadge">● CANLI AKD • ${esc(j.provider||'Lisanslı sağlayıcı')}</div>
+        <div class="marketStrip">
+            <div><span>KURUM</span><b>${rows.length}</b></div>
+            <div><span>NET ALIŞ</span><b class="green">${n(netBuy,0)}</b></div>
+            <div><span>NET SATIŞ</span><b class="red">${n(netSell,0)}</b></div>
+        </div>
+        <div class="dataTableWrap">
+            <table class="dataTable">
+                <thead><tr><th>KURUM</th><th>ALIŞ LOT</th><th>SATIŞ LOT</th><th>NET LOT</th><th>NET TL</th><th>ORT.</th></tr></thead>
+                <tbody>${table}</tbody>
+            </table>
+        </div>
+        <div class="warning" style="margin-top:10px">AKD seans içi aracı kurum işlemlerini gösterir; tek başına virman kanıtı değildir.</div>`
+    }catch(e){
+        if(!silent) p.innerHTML='<div class="warning">Canlı AKD alınamadı: '+esc(e.message)+'</div>'
+    }
+}
+
+async function loadTakas(symbol,silent=false){
+    const p=document.getElementById("panel")
+    if(!silent) p.innerHTML='<div class="loading">Takas verisi alınıyor...</div>'
+
+    try{
+        const r=await fetch("/api/takas/"+encodeURIComponent(symbol),{cache:"no-store"})
+        const j=await r.json()
+
+        if(!j.configured){
+            p.innerHTML=`
+            <div class="card"><h3>Takas / Saklama</h3></div>
+            <div class="locked">
+            Takas ekranı hazır; gerçek kurum saklama ve değişim verisi için
+            lisanslı takas API bağlantısı tanımlanmalıdır.
+            </div>`
+            return
+        }
+
+        if(!j.ok) throw new Error(j.error||"Takas alınamadı")
+        const rows=j.rows||[]
+        if(!rows.length){
+            p.innerHTML='<div class="warning">Sağlayıcı bağlantısı açık fakat bu hisse için takas satırı dönmedi.</div>'
+            return
+        }
+
+        const table=rows.slice(0,40).map(x=>`
+            <tr>
+                <td>${esc(x.institution)}</td>
+                <td>${n(x.holding,0)}</td>
+                <td class="${Number(x.change)>=0?'green':'red'}">${Number(x.change)>=0?'+':''}${n(x.change,0)}</td>
+                <td>%${n(x.percent,2)}</td>
+            </tr>`).join("")
+
+        p.innerHTML=`
+        <div class="providerBadge">● TAKAS VERİSİ • ${esc(j.provider||'Lisanslı sağlayıcı')}</div>
+        <div class="dataTableWrap">
+            <table class="dataTable">
+                <thead><tr><th>KURUM</th><th>SAKLAMA LOT</th><th>DEĞİŞİM</th><th>PAY</th></tr></thead>
+                <tbody>${table}</tbody>
+            </table>
+        </div>
+        <div class="warning" style="margin-top:10px">Kesinleşmiş takas verisi işlem gününe göre gecikmeli olabilir; sağlayıcının tarih bilgisini esas al.</div>`
+    }catch(e){
+        if(!silent) p.innerHTML='<div class="warning">Takas verisi alınamadı: '+esc(e.message)+'</div>'
+    }
+}
+
+function estimatedVirmanHtml(s){
+    const v=s.institutional||{}
+    const directionClass=(v.direction||"").includes("SATIŞ")?'red':'green'
+    const reasons=(v.reasons&&v.reasons.length)
+        ? v.reasons.map(x=>'✓ '+esc(x)).join('<br>')
+        : 'Belirgin kurumsal hareket ölçütü yok.'
+
+    return `
+    <div class="signalBox">
+        <div>TAHMİNİ KURUMSAL / VİRMAN SKORU</div>
+        <div class="signalBig">${v.score||0}/100</div>
+        <b class="${directionClass}">${esc(v.direction||'YÖN BELİRSİZ')}</b>
+        <div style="margin-top:7px;color:#8e9aae">${esc(v.level||'NORMAL')}</div>
+    </div>
+    <div class="card">
+        <div class="rows">
+            <div class="row"><span>GÖRELİ HACİM</span><b>${n(s.relative_volume,2)}x</b></div>
+            <div class="row"><span>TOPLAM İŞLEM</span><b>${money(v.transaction_value)}</b></div>
+            <div class="row"><span>NORMAL ÜSTÜ LOT</span><b>${n(v.abnormal_volume,0)}</b></div>
+            <div class="row"><span>NORMAL ÜSTÜ TL</span><b>${money(v.abnormal_value)}</b></div>
+        </div>
+    </div>
+    <div class="card"><h3>Skorun Nedenleri</h3><div class="desc" style="line-height:1.7">${reasons}</div></div>`
+}
+
+async function loadVirman(symbol,silent=false){
+    const p=document.getElementById("panel")
+    const estimate=estimatedVirmanHtml(selected)
+    if(!silent) p.innerHTML=estimate+'<div class="loading">Lisanslı AKD + takas eşleşmesi kontrol ediliyor...</div>'
+
+    try{
+        const r=await fetch("/api/virman-check/"+encodeURIComponent(symbol),{cache:"no-store"})
+        const j=await r.json()
+
+        if(!j.configured){
+            p.innerHTML=estimate+`
+            <div class="locked">
+            Yukarıdaki skor fiyat ve hacimden üretilen tahmindir.
+            Gerçek virman karşılaştırması için canlı AKD ve takas API bağlantıları
+            birlikte tanımlandığında kurumdan kuruma lot eşleşmeleri burada açılır.
+            </div>`
+            return
+        }
+
+        if(!j.ok) throw new Error(j.note||j.akd_error||j.takas_error||"Karşılaştırma yapılamadı")
+        const matches=j.matches||[]
+        if(!matches.length){
+            p.innerHTML=estimate+`
+            <div class="card"><h3>AKD + Takas Kontrolü</h3>
+            <div class="green">Bu hissede eşik geçen kurumdan kuruma lot eşleşmesi bulunmadı.</div></div>
+            <div class="warning">Bu sonuç virman olmadığı garantisi vermez.</div>`
+            return
+        }
+
+        const table=matches.map(x=>`
+            <tr>
+                <td>${esc(x.from)}</td>
+                <td>${esc(x.to)}</td>
+                <td>${n(x.lot,0)}</td>
+                <td>%${n(x.difference_percent,2)}</td>
+                <td>${x.score}/100</td>
+                <td class="${x.score>=75?'green':''}">${esc(x.label)}</td>
+            </tr>`).join("")
+
+        p.innerHTML=estimate+`
+        <div class="providerBadge">● AKD + TAKAS EŞLEŞTİRMESİ • ${esc(j.provider||'Lisanslı sağlayıcı')}</div>
+        <div class="dataTableWrap">
+            <table class="dataTable">
+                <thead><tr><th>ÇIKAN KURUM</th><th>GİREN KURUM</th><th>LOT</th><th>FARK</th><th>SKOR</th><th>DURUM</th></tr></thead>
+                <tbody>${table}</tbody>
+            </table>
+        </div>
+        <div class="warning" style="margin-top:10px">Eşleşme olası virmanı gösterir; kesin yatırımcı kimliği veya kesin işlem türü değildir.</div>`
+    }catch(e){
+        if(!silent) p.innerHTML=estimate+'<div class="warning">AKD–takas karşılaştırması yapılamadı: '+esc(e.message)+'</div>'
+    }
+}
+
 function closeDetail(){
+    if(depthTimer){
+        clearInterval(depthTimer)
+        depthTimer=null
+    }
     document.getElementById("detail").style.display="none"
     document.getElementById("home").style.display="block"
 }
 
 function detailTab(tab,el){
+
+    if(depthTimer){
+        clearInterval(depthTimer)
+        depthTimer=null
+    }
 
     document.querySelectorAll(".detailTabs button")
         .forEach(b=>b.classList.remove("active"))
@@ -2049,8 +2948,8 @@ function detailTab(tab,el){
         loadDepth(s.symbol);
 
         depthTimer = setInterval(()=>{
-            loadDepth(s.symbol);
-        },1000);
+            if(selected&&selected.symbol===s.symbol) loadDepth(s.symbol,true);
+        },3000);
 
         return
     }
@@ -2059,8 +2958,8 @@ function detailTab(tab,el){
         loadDepth(s.symbol);
 
         depthTimer = setInterval(()=>{
-            loadDepth(s.symbol);
-        },1000);
+            if(selected&&selected.symbol===s.symbol) loadDepth(s.symbol,true);
+        },3000);
 
         return
     }
@@ -2268,36 +3167,27 @@ function detailTab(tab,el){
     }
 
     if(tab==="akd"){
-        p.innerHTML=`
-        <div class="card">
-        <h3>Aracı Kurum Dağılımı — AKD</h3>
-        </div>
-
-        <div class="warning">
-        Burada kurum bazında
-        <b>Alış Lot • Satış Lot • Net Lot • Net TL • En Güçlü Alıcılar • En Güçlü Satıcılar</b>
-        gösterilecek.
-
-        <br><br>
-
-        Gerçek AKD verisi mevcut ücretsiz tarama kaynağında bulunmadığı
-        için şu anda rakam uydurmuyoruz. Lisanslı AKD kaynağı bağlandığında
-        bu sekme otomatik gerçek verilerle dolacak.
-        </div>
-        `
+        loadAkd(s.symbol)
+        depthTimer=setInterval(()=>{
+            if(selected&&selected.symbol===s.symbol) loadAkd(s.symbol,true)
+        },5000)
+        return
     }
 
     if(tab==="takas"){
-        p.innerHTML=`
-        <div class="card">
-        <h3>Takas / Saklama</h3>
-        </div>
+        loadTakas(s.symbol)
+        depthTimer=setInterval(()=>{
+            if(selected&&selected.symbol===s.symbol) loadTakas(s.symbol,true)
+        },60000)
+        return
+    }
 
-        <div class="warning">
-        Kurumların saklama oranları, takas değişimleri ve yoğunlaşma
-        verileri için gerçek takas veri sağlayıcısı bağlanması gerekiyor.
-        </div>
-        `
+    if(tab==="virman"){
+        loadVirman(s.symbol)
+        depthTimer=setInterval(()=>{
+            if(selected&&selected.symbol===s.symbol) loadVirman(s.symbol,true)
+        },60000)
+        return
     }
 
     if(tab==="kap"){
@@ -2350,6 +3240,7 @@ setInterval(loadKurlar, 1000)
  <button onclick="bottomGo('strong',this)"><b>⚡</b>Sinyaller</button>
  <button onclick="bottomGo('strong',this)"><b>★</b>Güçlü</button>
  <button onclick="bottomGo('volume',this)"><b>▥</b>Hacim</button>
+ <button onclick="bottomGo('virman',this)"><b>⇄</b>Virman</button>
 </div>
 
 <script>
@@ -2360,7 +3251,8 @@ function bottomGo(type,el){
   const map={
     all:'all',
     strong:'strong',
-    volume:'volume'
+    volume:'volume',
+    virman:'virman'
   };
 
   const wanted=map[type] || 'all';
@@ -2370,7 +3262,8 @@ function bottomGo(type,el){
   const names={
     all:'Tüm BIST',
     strong:'Güçlü',
-    volume:'Hacim'
+    volume:'Hacim',
+    virman:'Virman'
   };
   const target=buttons.find(b=>b.textContent.trim()===names[wanted]);
   if(target){
@@ -2425,6 +3318,19 @@ def home():
     return render_template_string(HTML)
 
 
+@app.route("/api/health")
+def api_health():
+    return jsonify({
+        "ok": True,
+        "version": APP_VERSION,
+        "market_count": len(CACHE.get("stocks", [])),
+        "market_updated": CACHE.get("updated", 0),
+        "akd_configured": bool(AKD_API_URL),
+        "takas_configured": bool(TAKAS_API_URL),
+        "telegram_configured": bool(TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID)
+    })
+
+
 if __name__ == "__main__":
 
     threading.Thread(
@@ -2434,7 +3340,7 @@ if __name__ == "__main__":
 
     port = int(os.environ.get("PORT", 5000))
 
-    print("BIST VERİ TERMİNALİ V2 AKTİF")
+    print("BIST VERİ TERMİNALİ V6 PRO AKTİF")
     print("http://127.0.0.1:%s" % port)
 
     app.run(
