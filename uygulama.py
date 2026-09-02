@@ -9,6 +9,7 @@ import random
 import string
 
 app = Flask(__name__)
+APP_VERSION = "6.2-CANLI"
 
 TV_URL = "https://scanner.tradingview.com/turkey/scan"
 
@@ -19,13 +20,64 @@ HEADERS = {
     "Referer": "https://www.tradingview.com/"
 }
 
+# Ücretsiz toplu piyasa kaynağı için güvenli en hızlı yenileme aralığı.
+# Her hisse için ayrı ayrı bağlantı açmak yerine bütün BIST listesini tek
+# istekte yeniliyoruz. Böylece yaklaşık 650 hissenin tamamı aynı anda taranır.
+MARKET_REFRESH_SECONDS = min(
+    60, max(10, int(os.getenv("MARKET_REFRESH_SECONDS", "10")))
+)
+MARKET_BACKGROUND_ENABLED = os.getenv(
+    "MARKET_BACKGROUND_ENABLED", "1"
+).strip().lower() not in {"0", "false", "no"}
+
 CACHE = {
     "stocks": [],
-    "updated": 0
+    "updated": 0,
+    "last_error": None
 }
+CACHE_LOCK = threading.RLock()
+MARKET_FETCH_LOCK = threading.Lock()
+MARKET_WORKER_LOCK = threading.Lock()
+MARKET_WORKER_STARTED = False
 
 LIVE_CACHE = {}
 LIVE_LOCK = threading.Lock()
+
+# Halka acik fiyat/hacim verisinden uretilen OLASI kurumsal hareket esikleri.
+# Bu modul gercek MKK virman kaydi veya kurum isimleri uretmez.
+VIRMAN_MIN_RELATIVE_VOLUME = 2.50
+VIRMAN_MIN_TRANSACTION_TL = 50_000_000
+VIRMAN_MIN_ABNORMAL_TL = 25_000_000
+VIRMAN_MIN_SCORE = 70
+VIRMAN_ALERT_COOLDOWN = 3 * 60 * 60
+VIRMAN_MAX_TELEGRAM = 5
+
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()
+
+VIRMAN_LAST_SENT = {}
+VIRMAN_ALERT_LOCK = threading.Lock()
+
+# Lisansli canli AKD / Takas saglayicisi icin genel REST baglantisi.
+# Ornek URL: https://saglayici.example/akd/{symbol}
+AKD_API_URL = os.getenv("AKD_API_URL", "").strip()
+TAKAS_API_URL = os.getenv("TAKAS_API_URL", "").strip()
+MARKET_DATA_API_KEY = os.getenv("MARKET_DATA_API_KEY", "").strip()
+MARKET_DATA_API_HEADER = os.getenv(
+    "MARKET_DATA_API_HEADER", "Authorization"
+).strip()
+MARKET_DATA_API_PREFIX = os.getenv(
+    "MARKET_DATA_API_PREFIX", "Bearer"
+).strip()
+AKD_SYMBOL_PARAM = os.getenv("AKD_SYMBOL_PARAM", "symbol").strip()
+AKD_PROVIDER_NAME = os.getenv("AKD_PROVIDER_NAME", "Lisanslı veri sağlayıcı").strip()
+AKD_CACHE_SECONDS = max(1, int(os.getenv("AKD_CACHE_SECONDS", "5")))
+VIRMAN_MIN_TRANSFER_LOT = max(
+    1, int(os.getenv("VIRMAN_MIN_TRANSFER_LOT", "100000"))
+)
+
+PRO_DATA_CACHE = {}
+PRO_DATA_LOCK = threading.Lock()
 
 COLUMNS = [
     "name",
@@ -116,72 +168,487 @@ def sinyal_adi(score):
     return "ZAYIF"
 
 
-def fetch_market():
-    payload = {
-        "filter": [
-            {"left": "exchange", "operation": "equal", "right": "BIST"}
-        ],
-        "options": {"lang": "tr"},
-        "markets": ["turkey"],
-        "symbols": {"query": {"types": []}, "tickers": []},
-        "columns": COLUMNS,
-        "sort": {"sortBy": "volume", "sortOrder": "desc"},
-        "range": [0, 9999]
+def sayi(value, default=0.0):
+    try:
+        if value is None:
+            return default
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def virman_analizi(s):
+    """Fiyat/hacim verisinden olasi kurumsal hareket skoru uretir."""
+    price = sayi(s.get("price"))
+    volume = sayi(s.get("volume"))
+    relative_volume = sayi(s.get("relative_volume"))
+    change = sayi(s.get("change"))
+    ema20 = sayi(s.get("ema20"))
+    macd = sayi(s.get("macd"))
+    macd_signal = sayi(s.get("macd_signal"))
+
+    transaction_value = max(0.0, price * volume)
+    normal_volume = volume / relative_volume if relative_volume > 0 else volume
+    abnormal_volume = max(0.0, volume - normal_volume)
+    abnormal_value = max(0.0, price * abnormal_volume)
+
+    score = 0
+    reasons = []
+
+    if relative_volume >= 6:
+        score += 35
+        reasons.append("Göreli hacim 6x ve üzerinde")
+    elif relative_volume >= 4:
+        score += 32
+        reasons.append("Göreli hacim 4x ve üzerinde")
+    elif relative_volume >= 3:
+        score += 28
+        reasons.append("Göreli hacim 3x ve üzerinde")
+    elif relative_volume >= VIRMAN_MIN_RELATIVE_VOLUME:
+        score += 24
+        reasons.append("Göreli hacim 2,5x ve üzerinde")
+
+    if abnormal_value >= 1_000_000_000:
+        score += 30
+        reasons.append("Normal üstü hacim 1 milyar TL üzerinde")
+    elif abnormal_value >= 500_000_000:
+        score += 27
+        reasons.append("Normal üstü hacim 500 milyon TL üzerinde")
+    elif abnormal_value >= 200_000_000:
+        score += 23
+        reasons.append("Normal üstü hacim 200 milyon TL üzerinde")
+    elif abnormal_value >= 100_000_000:
+        score += 20
+        reasons.append("Normal üstü hacim 100 milyon TL üzerinde")
+    elif abnormal_value >= 50_000_000:
+        score += 16
+        reasons.append("Normal üstü hacim 50 milyon TL üzerinde")
+    elif abnormal_value >= VIRMAN_MIN_ABNORMAL_TL:
+        score += 12
+        reasons.append("Normal üstü hacim 25 milyon TL üzerinde")
+
+    if transaction_value >= 2_000_000_000:
+        score += 15
+        reasons.append("İşlem büyüklüğü 2 milyar TL üzerinde")
+    elif transaction_value >= 1_000_000_000:
+        score += 13
+        reasons.append("İşlem büyüklüğü 1 milyar TL üzerinde")
+    elif transaction_value >= 500_000_000:
+        score += 11
+        reasons.append("İşlem büyüklüğü 500 milyon TL üzerinde")
+    elif transaction_value >= 200_000_000:
+        score += 9
+        reasons.append("İşlem büyüklüğü 200 milyon TL üzerinde")
+    elif transaction_value >= VIRMAN_MIN_TRANSACTION_TL:
+        score += 7
+        reasons.append("İşlem büyüklüğü 50 milyon TL üzerinde")
+
+    bullish = (
+        change >= 0.25
+        and price > 0
+        and ema20 > 0
+        and price > ema20
+        and macd > macd_signal
+    )
+    bearish = (
+        change <= -0.25
+        and price > 0
+        and ema20 > 0
+        and price < ema20
+        and macd < macd_signal
+    )
+    quiet_big_volume = abs(change) <= 0.60 and relative_volume >= 3
+
+    if bullish:
+        score += 20
+        direction = "ALIM YÖNLÜ OLASI TOPLAMA"
+        reasons.append("Fiyat, EMA20 ve MACD alım yönünü destekliyor")
+    elif bearish:
+        score += 20
+        direction = "SATIŞ YÖNLÜ OLASI DAĞITIM"
+        reasons.append("Fiyat, EMA20 ve MACD satış yönünü destekliyor")
+    elif quiet_big_volume:
+        score += 16
+        direction = "YÖNÜ BELİRSİZ BÜYÜK HACİM"
+        reasons.append("Yüksek hacme rağmen fiyat hareketi sınırlı")
+    elif change > 0:
+        score += 10
+        direction = "ALIM YÖNLÜ İZLE"
+    elif change < 0:
+        score += 10
+        direction = "SATIŞ YÖNLÜ İZLE"
+    else:
+        score += 7
+        direction = "YÖN BELİRSİZ"
+
+    score = max(0, min(100, int(round(score))))
+    candidate = (
+        relative_volume >= VIRMAN_MIN_RELATIVE_VOLUME
+        and transaction_value >= VIRMAN_MIN_TRANSACTION_TL
+        and abnormal_value >= VIRMAN_MIN_ABNORMAL_TL
+        and score >= VIRMAN_MIN_SCORE
+        and abs(change) <= 6
+    )
+
+    if score >= 85:
+        level = "ÇOK GÜÇLÜ ADAY"
+    elif score >= VIRMAN_MIN_SCORE:
+        level = "GÜÇLÜ ADAY"
+    elif score >= 55:
+        level = "İZLE"
+    else:
+        level = "NORMAL"
+
+    return {
+        "candidate": candidate,
+        "score": score,
+        "level": level,
+        "direction": direction,
+        "transaction_value": int(transaction_value),
+        "normal_volume": int(max(0.0, normal_volume)),
+        "abnormal_volume": int(abnormal_volume),
+        "abnormal_value": int(abnormal_value),
+        "reasons": reasons
     }
 
-    r = requests.post(
-        TV_URL,
-        headers=HEADERS,
-        json=payload,
-        timeout=30
-    )
-    r.raise_for_status()
 
-    raw = r.json()
-    stocks = []
-
-    for row in raw.get("data", []):
-        d = row.get("d", [])
-
-        if len(d) < len(COLUMNS):
-            continue
-
-        stock = {
-            "symbol": d[0],
-            "description": d[1] or "",
-            "price": d[2],
-            "change": d[3],
-            "volume": d[4],
-            "relative_volume": d[5],
-            "rsi": d[6],
-            "macd": d[7],
-            "macd_signal": d[8],
-            "ema20": d[9],
-            "ema50": d[10],
-            "sma20": d[11],
-            "recommend": d[12],
-            "market_cap": d[13]
+def fetch_market():
+    """Bütün BIST hisselerini tek toplu tarama isteğiyle yeniler."""
+    with MARKET_FETCH_LOCK:
+        payload = {
+            "filter": [
+                {"left": "exchange", "operation": "equal", "right": "BIST"}
+            ],
+            "options": {"lang": "tr"},
+            "markets": ["turkey"],
+            "symbols": {"query": {"types": []}, "tickers": []},
+            "columns": COLUMNS,
+            "sort": {"sortBy": "volume", "sortOrder": "desc"},
+            "range": [0, 9999]
         }
 
-        stock["score"] = puanla(stock)
-        stock["signal"] = sinyal_adi(stock["score"])
+        r = requests.post(
+            TV_URL,
+            headers=HEADERS,
+            json=payload,
+            timeout=30
+        )
+        r.raise_for_status()
 
-        stocks.append(stock)
+        raw = r.json()
+        stocks = []
 
-    CACHE["stocks"] = stocks
-    CACHE["updated"] = int(time.time())
+        for row in raw.get("data", []):
+            d = row.get("d", [])
 
-    return stocks
+            if len(d) < len(COLUMNS):
+                continue
+
+            stock = {
+                "symbol": d[0],
+                "description": d[1] or "",
+                "price": d[2],
+                "change": d[3],
+                "volume": d[4],
+                "relative_volume": d[5],
+                "rsi": d[6],
+                "macd": d[7],
+                "macd_signal": d[8],
+                "ema20": d[9],
+                "ema50": d[10],
+                "sma20": d[11],
+                "recommend": d[12],
+                "market_cap": d[13]
+            }
+
+            stock["score"] = puanla(stock)
+            stock["signal"] = sinyal_adi(stock["score"])
+            stock["institutional"] = virman_analizi(stock)
+
+            stocks.append(stock)
+
+        # Sağlayıcı geçici olarak boş/bozuk yanıt dönerse ekrandaki son
+        # başarılı listeyi silmeyelim.
+        if not stocks:
+            raise RuntimeError("BIST taramasından geçerli hisse listesi gelmedi")
+
+        with CACHE_LOCK:
+            CACHE["stocks"] = stocks
+            CACHE["updated"] = int(time.time())
+            CACHE["last_error"] = None
+
+        return stocks
 
 
 def get_market():
-    if not CACHE["stocks"] or time.time() - CACHE["updated"] > 60:
-        try:
-            return fetch_market()
-        except Exception as e:
-            print("Veri hatası:", e)
+    with CACHE_LOCK:
+        stocks = CACHE["stocks"]
+        updated = CACHE["updated"]
 
-    return CACHE["stocks"]
+    stale = not stocks or time.time() - updated > MARKET_REFRESH_SECONDS
+    if not stale:
+        return stocks
+
+    # Arka plan yenilemesi sürerken kullanıcıya son başarılı listeyi hemen
+    # döndür; sayfanın 30 saniyelik sağlayıcı zaman aşımını beklemesini önle.
+    if stocks and MARKET_FETCH_LOCK.locked():
+        return stocks
+
+    try:
+        return fetch_market()
+    except Exception as e:
+        print("Veri hatası:", e)
+        with CACHE_LOCK:
+            CACHE["last_error"] = type(e).__name__
+            return CACHE["stocks"]
+
+
+def ilk_deger(row, names, default=None):
+    if not isinstance(row, dict):
+        return default
+    lowered = {str(k).lower(): v for k, v in row.items()}
+    for name in names:
+        if name in row and row[name] is not None:
+            return row[name]
+        value = lowered.get(str(name).lower())
+        if value is not None:
+            return value
+    return default
+
+
+def veri_satirlari(payload, depth=0):
+    if isinstance(payload, list):
+        return payload
+    if not isinstance(payload, dict) or depth > 3:
+        return []
+
+    for key in (
+        "institutions", "brokers", "rows", "items", "data",
+        "result", "results", "records", "takas", "akd"
+    ):
+        value = ilk_deger(payload, [key])
+        if isinstance(value, list):
+            return value
+        if isinstance(value, dict):
+            nested = veri_satirlari(value, depth + 1)
+            if nested:
+                return nested
+    return []
+
+
+def kurum_adi(row):
+    value = ilk_deger(row, [
+        "institution", "institution_name", "broker", "broker_name",
+        "name", "kurum", "kurum_adi", "kurumAdi", "araci_kurum"
+    ], "")
+    return str(value or "").strip()
+
+
+def akd_normalize(payload):
+    rows = []
+    for raw in veri_satirlari(payload):
+        name = kurum_adi(raw)
+        if not name:
+            continue
+
+        buy = sayi(ilk_deger(raw, [
+            "buy", "buy_lot", "buy_lots", "buyLot", "alis", "alış",
+            "alis_lot", "alisLot"
+        ]))
+        sell = sayi(ilk_deger(raw, [
+            "sell", "sell_lot", "sell_lots", "sellLot", "satis", "satış",
+            "satis_lot", "satisLot"
+        ]))
+        net_raw = ilk_deger(raw, [
+            "net", "net_lot", "net_lots", "netLot", "net_adet", "netAdet"
+        ])
+        net = sayi(net_raw, buy - sell) if net_raw is not None else buy - sell
+        net_tl = sayi(ilk_deger(raw, [
+            "net_tl", "net_value", "netValue", "net_tutar", "netTutar"
+        ]))
+        avg = sayi(ilk_deger(raw, [
+            "average", "average_price", "avg_price", "avgPrice",
+            "ortalama", "ortalama_fiyat"
+        ]))
+
+        rows.append({
+            "institution": name,
+            "buy": int(buy),
+            "sell": int(sell),
+            "net": int(net),
+            "net_tl": int(net_tl),
+            "average": avg
+        })
+
+    rows.sort(key=lambda x: abs(x["net"]), reverse=True)
+    return rows
+
+
+def takas_normalize(payload):
+    rows = []
+    for raw in veri_satirlari(payload):
+        name = kurum_adi(raw)
+        if not name:
+            continue
+
+        holding = sayi(ilk_deger(raw, [
+            "holding", "balance", "quantity", "lot", "lots", "adet",
+            "bakiye", "saklama"
+        ]))
+        change = sayi(ilk_deger(raw, [
+            "change", "change_lot", "changeLot", "difference", "diff",
+            "degisim", "değişim", "fark", "net_change"
+        ]))
+        percent = sayi(ilk_deger(raw, [
+            "percent", "percentage", "share", "ratio", "oran", "pay"
+        ]))
+
+        rows.append({
+            "institution": name,
+            "holding": int(holding),
+            "change": int(change),
+            "percent": percent
+        })
+
+    rows.sort(key=lambda x: abs(x["change"]), reverse=True)
+    return rows
+
+
+def provider_headers():
+    headers = {
+        "Accept": "application/json",
+        "User-Agent": "BIST-Veri-Terminali/6.0"
+    }
+    if MARKET_DATA_API_KEY:
+        value = MARKET_DATA_API_KEY
+        if MARKET_DATA_API_PREFIX:
+            value = f"{MARKET_DATA_API_PREFIX} {value}"
+        headers[MARKET_DATA_API_HEADER] = value
+    return headers
+
+
+def professional_data(kind, symbol, force=False):
+    symbol = symbol.upper().strip()
+    url_template = AKD_API_URL if kind == "akd" else TAKAS_API_URL
+    cache_key = f"{kind}:{symbol}"
+
+    if not url_template:
+        return {
+            "ok": False,
+            "configured": False,
+            "rows": [],
+            "error": "Lisanslı veri bağlantısı henüz tanımlanmadı."
+        }
+
+    with PRO_DATA_LOCK:
+        old = PRO_DATA_CACHE.get(cache_key)
+        if (
+            not force
+            and old
+            and time.time() - old.get("cached_at", 0) < AKD_CACHE_SECONDS
+        ):
+            return old
+
+    try:
+        params = None
+        if "{symbol}" in url_template:
+            url = url_template.replace("{symbol}", symbol)
+        else:
+            url = url_template
+            params = {AKD_SYMBOL_PARAM: symbol}
+
+        response = requests.get(
+            url,
+            params=params,
+            headers=provider_headers(),
+            timeout=12
+        )
+        response.raise_for_status()
+        payload = response.json()
+        rows = akd_normalize(payload) if kind == "akd" else takas_normalize(payload)
+
+        result = {
+            "ok": True,
+            "configured": True,
+            "provider": AKD_PROVIDER_NAME,
+            "symbol": symbol,
+            "rows": rows,
+            "updated": int(time.time()),
+            "cached_at": time.time()
+        }
+    except Exception as exc:
+        result = {
+            "ok": False,
+            "configured": True,
+            "provider": AKD_PROVIDER_NAME,
+            "symbol": symbol,
+            "rows": [],
+            "error": f"Veri sağlayıcı hatası: {type(exc).__name__}",
+            "updated": int(time.time()),
+            "cached_at": time.time()
+        }
+
+    with PRO_DATA_LOCK:
+        PRO_DATA_CACHE[cache_key] = result
+    return result
+
+
+def kurum_key(name):
+    return "".join(ch for ch in str(name).upper() if ch.isalnum())
+
+
+def gercek_veriden_virman_eslestir(akd_rows, takas_rows):
+    """AKD ile açıklanamayan, birbirine yakın takas giriş/çıkışlarını eşler."""
+    akd_net = {kurum_key(x["institution"]): sayi(x.get("net")) for x in akd_rows}
+    incoming = [x for x in takas_rows if sayi(x.get("change")) >= VIRMAN_MIN_TRANSFER_LOT]
+    outgoing = [x for x in takas_rows if sayi(x.get("change")) <= -VIRMAN_MIN_TRANSFER_LOT]
+    matches = []
+
+    for source in outgoing:
+        out_lot = abs(sayi(source.get("change")))
+        for target in incoming:
+            in_lot = abs(sayi(target.get("change")))
+            biggest = max(out_lot, in_lot)
+            if biggest <= 0:
+                continue
+
+            difference_pct = abs(out_lot - in_lot) / biggest * 100
+            if difference_pct > 3:
+                continue
+
+            source_akd = abs(akd_net.get(kurum_key(source["institution"]), 0))
+            target_akd = abs(akd_net.get(kurum_key(target["institution"]), 0))
+            explained_by_market = (
+                source_akd >= out_lot * 0.50
+                or target_akd >= in_lot * 0.50
+            )
+
+            score = 50
+            score += max(0, int(20 - difference_pct * 5))
+            if biggest >= 5_000_000:
+                score += 15
+            elif biggest >= 1_000_000:
+                score += 11
+            elif biggest >= 500_000:
+                score += 7
+            else:
+                score += 4
+            if not explained_by_market:
+                score += 15
+
+            score = min(100, score)
+            matches.append({
+                "from": source["institution"],
+                "to": target["institution"],
+                "lot": int((out_lot + in_lot) / 2),
+                "difference_percent": round(difference_pct, 2),
+                "score": score,
+                "market_explained": explained_by_market,
+                "label": "OLASI VİRMAN" if score >= 75 else "KONTROL ET"
+            })
+
+    matches.sort(key=lambda x: (x["score"], x["lot"]), reverse=True)
+    return matches[:10]
 
 
 def tv_sid(prefix):
@@ -355,24 +822,242 @@ def fetch_live_quote(symbol, wait_seconds=4):
             except:
                 pass
 
+
+def tl_yaz(value):
+    value = sayi(value)
+    if value >= 1_000_000_000:
+        return f"{value / 1_000_000_000:.2f} milyar TL"
+    if value >= 1_000_000:
+        return f"{value / 1_000_000:.1f} milyon TL"
+    return f"{value:,.0f} TL"
+
+
+def virman_telegram_alarmlari(stocks):
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        return []
+
+    now = time.time()
+    candidates = sorted(
+        [
+            s for s in stocks
+            if s.get("institutional", {}).get("candidate")
+        ],
+        key=lambda s: (
+            s.get("institutional", {}).get("score", 0),
+            s.get("institutional", {}).get("abnormal_value", 0)
+        ),
+        reverse=True
+    )
+
+    with VIRMAN_ALERT_LOCK:
+        fresh = [
+            s for s in candidates
+            if now - VIRMAN_LAST_SENT.get(s.get("symbol", ""), 0)
+            >= VIRMAN_ALERT_COOLDOWN
+        ][:VIRMAN_MAX_TELEGRAM]
+
+    if not fresh:
+        return []
+
+    lines = [
+        "⚠️ OLASI KURUMSAL / VİRMAN RADARI",
+        ""
+    ]
+    for stock in fresh:
+        info = stock["institutional"]
+        lines.extend([
+            f"📌 {stock['symbol']} — {info['score']}/100",
+            f"{info['direction']}",
+            f"Fiyat: {sayi(stock.get('price')):.2f} TL | "
+            f"Değişim: %{sayi(stock.get('change')):+.2f}",
+            f"Göreli hacim: {sayi(stock.get('relative_volume')):.2f}x",
+            f"İşlem: {tl_yaz(info['transaction_value'])}",
+            f"Normal üstü: {tl_yaz(info['abnormal_value'])}",
+            ""
+        ])
+
+    lines.extend([
+        "Bu bildirim halka açık piyasa verisinden üretilen tahmindir.",
+        "Gerçek virman teyidi için lisanslı AKD + T+2 takas gerekir.",
+        "Yatırım tavsiyesi değildir."
+    ])
+
+    try:
+        response = requests.post(
+            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+            data={"chat_id": TELEGRAM_CHAT_ID, "text": "\n".join(lines)},
+            timeout=15
+        )
+        response.raise_for_status()
+    except Exception as exc:
+        print("Virman Telegram hatası:", type(exc).__name__)
+        return []
+
+    sent = []
+    with VIRMAN_ALERT_LOCK:
+        for stock in fresh:
+            symbol = stock.get("symbol", "")
+            if symbol:
+                VIRMAN_LAST_SENT[symbol] = now
+                sent.append(symbol)
+    return sent
+
 def background_loop():
     while True:
         try:
-            fetch_market()
-            print("BIST verileri güncellendi:", len(CACHE["stocks"]))
+            stocks = fetch_market()
+            print(
+                "BIST canlı tarama güncellendi:",
+                len(stocks),
+                "hisse /",
+                MARKET_REFRESH_SECONDS,
+                "sn"
+            )
+            virman_telegram_alarmlari(stocks)
         except Exception as e:
             print("Arka plan veri hatası:", e)
+            with CACHE_LOCK:
+                CACHE["last_error"] = type(e).__name__
 
-        time.sleep(60)
+        time.sleep(MARKET_REFRESH_SECONDS)
+
+
+def start_market_worker():
+    """Gunicorn altında da tek bir canlı tarama iş parçacığı başlatır."""
+    global MARKET_WORKER_STARTED
+
+    if not MARKET_BACKGROUND_ENABLED:
+        return
+
+    with MARKET_WORKER_LOCK:
+        if MARKET_WORKER_STARTED:
+            return
+
+        threading.Thread(
+            target=background_loop,
+            daemon=True,
+            name="bist-canli-tarama"
+        ).start()
+        MARKET_WORKER_STARTED = True
+
+
+# Render'da uygulama Gunicorn ile içe aktarıldığı için __main__ bloğu
+# çalışmaz. İş parçacığını burada başlatmak canlı yenilemenin çalışması için
+# gereklidir; fonksiyon kendi sürecinde yalnızca bir kez başlar.
+start_market_worker()
 
 
 @app.route("/api/market")
 def api_market():
+    stocks = get_market()
+    with CACHE_LOCK:
+        updated = CACHE["updated"]
+        last_error = CACHE["last_error"]
+
+    response = jsonify({
+        "ok": True,
+        "count": len(stocks),
+        "virman_count": sum(
+            1 for s in stocks if s.get("institutional", {}).get("candidate")
+        ),
+        "stocks": stocks,
+        "updated": updated,
+        "refresh_seconds": MARKET_REFRESH_SECONDS,
+        "last_error": last_error,
+        "source": "Toplu BIST canlı tarama"
+    })
+    response.headers["Cache-Control"] = "no-store, max-age=0"
+    return response
+
+
+@app.route("/api/virman")
+def api_virman():
+    candidates = [
+        s for s in get_market()
+        if s.get("institutional", {}).get("candidate")
+    ]
+    candidates.sort(
+        key=lambda s: (
+            s.get("institutional", {}).get("score", 0),
+            s.get("institutional", {}).get("abnormal_value", 0)
+        ),
+        reverse=True
+    )
     return jsonify({
         "ok": True,
-        "count": len(get_market()),
-        "stocks": get_market(),
+        "count": len(candidates),
+        "candidates": candidates,
+        "real_virman": False,
+        "note": (
+            "Halka açık fiyat ve hacim verisinden üretilen olası kurumsal "
+            "hareket tahminidir; gerçek MKK virman kaydı değildir."
+        ),
         "updated": CACHE["updated"]
+    })
+
+
+def public_provider_result(result):
+    return {k: v for k, v in result.items() if k != "cached_at"}
+
+
+@app.route("/api/pro-status")
+def api_pro_status():
+    return jsonify({
+        "ok": True,
+        "akd_configured": bool(AKD_API_URL),
+        "takas_configured": bool(TAKAS_API_URL),
+        "provider": AKD_PROVIDER_NAME if (AKD_API_URL or TAKAS_API_URL) else None,
+        "estimated_radar": True,
+        "real_virman_requires_both": True
+    })
+
+
+@app.route("/api/akd/<symbol>")
+def api_akd(symbol):
+    result = public_provider_result(professional_data("akd", symbol))
+    result["real_akd"] = bool(result.get("ok") and result.get("rows"))
+    return jsonify(result)
+
+
+@app.route("/api/takas/<symbol>")
+def api_takas(symbol):
+    result = public_provider_result(professional_data("takas", symbol))
+    result["real_takas"] = bool(result.get("ok") and result.get("rows"))
+    return jsonify(result)
+
+
+@app.route("/api/virman-check/<symbol>")
+def api_virman_check(symbol):
+    akd = professional_data("akd", symbol)
+    takas = professional_data("takas", symbol)
+
+    if not akd.get("ok") or not takas.get("ok"):
+        return jsonify({
+            "ok": False,
+            "configured": bool(AKD_API_URL and TAKAS_API_URL),
+            "symbol": symbol.upper().strip(),
+            "matches": [],
+            "akd_error": akd.get("error"),
+            "takas_error": takas.get("error"),
+            "note": "Gerçek karşılaştırma için hem AKD hem takas bağlantısı gerekir."
+        })
+
+    matches = gercek_veriden_virman_eslestir(
+        akd.get("rows", []), takas.get("rows", [])
+    )
+    return jsonify({
+        "ok": True,
+        "configured": True,
+        "symbol": symbol.upper().strip(),
+        "matches": matches,
+        "count": len(matches),
+        "provider": AKD_PROVIDER_NAME,
+        "note": (
+            "AKD ile açıklanamayan, birbirine yakın takas giriş ve çıkışları "
+            "eşleştirilmiştir. Sonuç olası virman işaretidir; kesin yatırımcı "
+            "kimliği göstermez."
+        ),
+        "updated": int(time.time())
     })
 
 
@@ -387,13 +1072,334 @@ def api_stock(symbol):
                 "stock": s,
                 "realtime_depth": False,
                 "real_akd": False,
-                "real_takas": False
+                "real_takas": False,
+                "real_virman": False,
+                "estimated_institutional_movement": True
             })
 
     return jsonify({
         "ok": False,
         "error": "Hisse bulunamadı"
     }), 404
+
+
+KUR_CACHE = {"data": None, "updated": 0}
+
+def fetch_kurlar():
+    if KUR_CACHE["data"] and time.time() - KUR_CACHE["updated"] < 30:
+        return KUR_CACHE["data"]
+
+    out = {
+        "usd": None,
+        "eur": None,
+        "gram": None,
+        "ceyrek": None,
+        "updated": int(time.time())
+    }
+
+    try:
+        r = requests.get(
+            "https://dolartoday.org/api/rates?symbols=USD,EUR,GA",
+            timeout=10
+        )
+        r.raise_for_status()
+        j = r.json()
+        rates = j.get("rates", {})
+
+        usd = rates.get("USD") or rates.get("usd")
+        eur = rates.get("EUR") or rates.get("eur")
+        ga  = rates.get("GA") or rates.get("ga")
+
+        out["usd"] = usd
+        out["eur"] = eur
+        out["gram"] = ga
+
+    except Exception as e:
+        print("Kur API hatası:", e)
+
+    # Çeyrek altın için anahtarsız public endpoint denemesi.
+    try:
+        r = requests.get(
+            "https://api.apinoktam.erenozdemir.com.tr/public/v1/altin",
+            timeout=10
+        )
+        if r.ok:
+            j = r.json()
+            items = (
+                j.get("data", {}).get("kalemler")
+                or j.get("data")
+                or j.get("kalemler")
+                or []
+            )
+
+            if isinstance(items, list):
+                for x in items:
+                    name = str(
+                        x.get("sembol")
+                        or x.get("tur")
+                        or x.get("name")
+                        or x.get("isim")
+                        or ""
+                    ).lower()
+
+                    if "ceyrek" in name or "çeyrek" in name or name=="cey":
+                        out["ceyrek"] = x
+                        break
+    except Exception as e:
+        print("Çeyrek API hatası:", e)
+
+    KUR_CACHE["data"] = out
+    KUR_CACHE["updated"] = int(time.time())
+    return out
+
+
+@app.route("/api/kurlar")
+def api_kurlar():
+    return jsonify({
+        "ok": True,
+        "data": fetch_kurlar()
+    })
+
+
+# =========================
+# PIYASA TERMINALI API
+# =========================
+
+def _tr_num(v):
+    if v is None:
+        return None
+    if isinstance(v, (int, float)):
+        return float(v)
+    x = str(v).strip().replace(" ", "")
+    if "," in x and "." in x:
+        if x.rfind(",") > x.rfind("."):
+            x = x.replace(".", "").replace(",", ".")
+        else:
+            x = x.replace(",", "")
+    elif "," in x:
+        x = x.replace(",", ".")
+    try:
+        return float(x)
+    except:
+        return None
+
+
+def fetch_fx_gold_full():
+    import requests
+
+    r=requests.get(
+        "https://finans.truncgil.com/v3/today.json",
+        timeout=15,
+        headers={"User-Agent":"Mozilla/5.0"}
+    )
+    r.raise_for_status()
+    j=r.json()
+
+    doviz=[]
+    altin=[]
+
+    fx_symbols={
+        "USD":"USD","EUR":"EUR","GBP":"GBP","CHF":"CHF",
+        "CAD":"CAD","AUD":"AUD","RUB":"RUB","AED":"AED",
+        "DKK":"DKK","SEK":"SEK","NOK":"NOK","JPY":"JPY"
+    }
+
+    gold_symbols={
+        "gram-has-altin":"GA",
+        "ceyrek-altin":"Ç",
+        "yarim-altin":"Y",
+        "tam-altin":"TA",
+        "cumhuriyet-altini":"CA",
+        "ata-altin":"ATA",
+        "14-ayar-altin":"14A",
+        "18-ayar-altin":"18A",
+        "22-ayar-bilezik":"22A",
+        "ikibucuk-altin":"2.5",
+        "besli-altin":"5L",
+        "gremse-altin":"GR",
+        "resat-altin":"RŞ",
+        "hamit-altin":"HM",
+        "gumus":"XAG",
+        "gram-platin":"XPT",
+        "gram-paladyum":"XPD"
+    }
+
+    def val(x,*names):
+        for n in names:
+            if n in x and x[n] not in (None,""):
+                return _tr_num(x[n])
+        return None
+
+    for key,x in j.items():
+        if not isinstance(x,dict):
+            continue
+
+        lk=str(key).lower()
+
+        buy=val(x,"Buying","buying","Alış","alis")
+        sell=val(x,"Selling","selling","Satış","satis")
+        chg=val(
+            x,
+            "Change","change",
+            "ChangePercent","changePercent",
+            "ChangeRate","changeRate",
+            "Rate","rate",
+            "Değişim","degisim"
+        )
+
+        if key in fx_symbols:
+            doviz.append({
+                "symbol":fx_symbols[key],
+                "name":x.get("Name") or key,
+                "buy":buy,
+                "sell":sell,
+                "change_pct":chg
+            })
+            continue
+
+        for gkey,sym in gold_symbols.items():
+            if lk == gkey:
+                altin.append({
+                    "symbol":sym,
+                    "name":x.get("Name") or key.replace("-"," ").upper(),
+                    "buy":buy,
+                    "sell":sell,
+                    "change_pct":chg
+                })
+                break
+
+    return doviz,altin
+
+
+def fetch_crypto_full():
+    import requests
+
+    tickers=[
+        "BINANCE:BTCUSDT","BINANCE:ETHUSDT",
+        "BINANCE:BNBUSDT","BINANCE:SOLUSDT",
+        "BINANCE:XRPUSDT","BINANCE:ADAUSDT",
+        "BINANCE:DOGEUSDT","BINANCE:AVAXUSDT",
+        "BINANCE:LINKUSDT","BINANCE:TRXUSDT",
+        "BINANCE:DOTUSDT","BINANCE:SHIBUSDT"
+    ]
+
+    payload={
+        "symbols":{"tickers":tickers,"query":{"types":[]}},
+        "columns":["name","description","close","change","volume"]
+    }
+
+    r=requests.post(
+        "https://scanner.tradingview.com/crypto/scan",
+        json=payload,
+        timeout=15,
+        headers={
+            "User-Agent":"Mozilla/5.0",
+            "Content-Type":"text/plain;charset=UTF-8",
+            "Origin":"https://www.tradingview.com"
+        }
+    )
+    r.raise_for_status()
+
+    out=[]
+
+    for item in r.json().get("data",[]):
+        d=item.get("d") or []
+        if len(d)<5:
+            continue
+
+        sym=str(d[0]).replace("USDT","")
+
+        out.append({
+            "symbol":sym,
+            "name":d[1] or sym,
+            "price":d[2],
+            "change_pct":d[3],
+            "volume":d[4]
+        })
+
+    return out
+
+
+def fetch_bist_full():
+    import requests
+
+    tickers=[
+        "BIST:THYAO","BIST:ASELS","BIST:TUPRS","BIST:EREGL",
+        "BIST:KCHOL","BIST:SISE","BIST:AKBNK","BIST:GARAN",
+        "BIST:YKBNK","BIST:ISCTR","BIST:SAHOL","BIST:FROTO",
+        "BIST:TOASO","BIST:BIMAS","BIST:TCELL","BIST:ENKAI",
+        "BIST:PETKM","BIST:HEKTS","BIST:SASA","BIST:ASTOR",
+        "BIST:ENJSA","BIST:MGROS","BIST:ULKER","BIST:PGSUS",
+        "BIST:ARCLK","BIST:KOZAL","BIST:KRDMD","BIST:TTKOM",
+        "BIST:OYAKC","BIST:VAKBN"
+    ]
+
+    payload={
+        "symbols":{"tickers":tickers,"query":{"types":[]}},
+        "columns":["name","description","close","change","volume"]
+    }
+
+    r=requests.post(
+        "https://scanner.tradingview.com/turkey/scan",
+        json=payload,
+        timeout=15,
+        headers={"User-Agent":"Mozilla/5.0"}
+    )
+    r.raise_for_status()
+
+    out=[]
+
+    for item in r.json().get("data",[]):
+        d=item.get("d") or []
+        if len(d)<5:
+            continue
+
+        out.append({
+            "symbol":d[0],
+            "name":d[1] or d[0],
+            "price":d[2],
+            "change_pct":d[3],
+            "volume":d[4]
+        })
+
+    return out
+
+
+@app.route("/api/piyasa")
+def api_piyasa():
+    import time
+
+    result = {
+        "ok": True,
+        "updated": int(time.time()),
+        "doviz": [],
+        "altin": [],
+        "kripto": [],
+        "borsa": [],
+        "errors": {}
+    }
+
+    try:
+        doviz, altin = fetch_fx_gold_full()
+        result["doviz"] = doviz
+        result["altin"] = altin
+    except Exception as e:
+        result["errors"]["doviz_altin"] = str(e)
+
+    try:
+        result["kripto"] = fetch_crypto_full()
+    except Exception as e:
+        result["errors"]["kripto"] = str(e)
+
+    try:
+        result["borsa"] = fetch_bist_full()
+    except Exception as e:
+        result["errors"]["borsa"] = str(e)
+
+    resp = jsonify(result)
+    resp.headers["Access-Control-Allow-Origin"] = "*"
+    resp.headers["Cache-Control"] = "no-store"
+    return resp
 
 
 HTML = r'''
@@ -404,9 +1410,11 @@ HTML = r'''
 <meta name="viewport"
 content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
 
-<title>BIST Veri Terminali</title>
+<title>BIST Veri Terminali PRO</title>
 
 <script src="https://telegram.org/js/telegram-web-app.js"></script>
+<!-- AKD ekran görüntüsünü telefonda, sunucuya göndermeden okumak için. -->
+<script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
 
 <style>
 *{
@@ -447,6 +1455,37 @@ body{
     font-size:12px;
 }
 
+.liveStatus{
+    display:flex;
+    align-items:center;
+    gap:7px;
+    margin-top:9px;
+    color:#9baac0;
+    font-size:11px;
+    font-weight:700;
+}
+
+.liveDot{
+    width:8px;
+    height:8px;
+    flex:0 0 8px;
+    border-radius:50%;
+    background:#20d391;
+    box-shadow:0 0 0 0 rgba(32,211,145,.55);
+    animation:livePulse 1.6s infinite;
+}
+
+.liveStatus.warningLive{color:#f5ca61}
+.liveStatus.warningLive .liveDot{
+    background:#f5ca61;
+    animation:none;
+}
+
+@keyframes livePulse{
+    70%{box-shadow:0 0 0 7px rgba(32,211,145,0)}
+    100%{box-shadow:0 0 0 0 rgba(32,211,145,0)}
+}
+
 .search{
     width:100%;
     border:none;
@@ -461,7 +1500,7 @@ body{
 
 .stats{
     display:grid;
-    grid-template-columns:repeat(3,1fr);
+    grid-template-columns:repeat(4,1fr);
     gap:8px;
     padding:12px 14px 5px;
 }
@@ -518,6 +1557,80 @@ body{
     cursor:pointer;
 }
 
+.stock.virmanCandidate{
+    border-color:#7b5b18;
+    box-shadow:0 0 0 1px rgba(245,187,61,.08);
+}
+
+.virmanTag{
+    margin-top:10px;
+    padding:8px 10px;
+    border-radius:9px;
+    background:#2b210d;
+    border:1px solid #6d5015;
+    color:#ffd36d;
+    font-size:11px;
+    font-weight:800;
+}
+
+.virmanTag.buy{
+    background:#0e2a20;
+    border-color:#175b44;
+    color:#39dfa4;
+}
+
+.virmanTag.sell{
+    background:#2b1117;
+    border-color:#6b2635;
+    color:#ff7487;
+}
+
+.providerBadge{
+    display:inline-block;
+    margin-bottom:10px;
+    padding:6px 9px;
+    border-radius:8px;
+    background:#102947;
+    border:1px solid #1f5590;
+    color:#82baff;
+    font-size:11px;
+    font-weight:800;
+}
+
+.dataTableWrap{
+    overflow:auto;
+    border-radius:12px;
+    border:1px solid #1a2636;
+}
+
+.dataTable{
+    width:100%;
+    min-width:560px;
+    border-collapse:collapse;
+    background:#0d141e;
+}
+
+.dataTable th,
+.dataTable td{
+    padding:10px 8px;
+    border-bottom:1px solid #1a2636;
+    text-align:right;
+    font-size:12px;
+}
+
+.dataTable th:first-child,
+.dataTable td:first-child{
+    text-align:left;
+}
+
+.dataTable th{
+    color:#8290a8;
+    font-size:10px;
+    position:sticky;
+    top:0;
+    background:#111a26;
+}
+
 .stockTop{
     display:flex;
     justify-content:space-between;
@@ -538,6 +1651,38 @@ body{
 .price{
     font-weight:800;
     text-align:right;
+}
+
+.price.tickUp{
+    color:#26dfa0;
+    animation:priceUp .95s ease-out;
+}
+
+.price.tickDown{
+    color:#ff7180;
+    animation:priceDown .95s ease-out;
+}
+
+@keyframes priceUp{
+    0%{background:rgba(38,223,160,.34);transform:translateY(-2px)}
+    100%{background:transparent;transform:translateY(0)}
+}
+
+@keyframes priceDown{
+    0%{background:rgba(255,113,128,.28);transform:translateY(2px)}
+    100%{background:transparent;transform:translateY(0)}
+}
+
+.showMore{
+    display:block;
+    width:calc(100% - 24px);
+    margin:12px auto 6px;
+    padding:12px;
+    border:1px solid #275b9f;
+    border-radius:12px;
+    background:#11284a;
+    color:#8fc1ff;
+    font-weight:800;
 }
 
 .green{color:#29d391}
@@ -948,206 +2093,178 @@ body{
     font-weight:900;
 }
 
-
-/* V4_TELEGRAM_SCREEN */
-
-.stock{
-    cursor:pointer!important;
-    pointer-events:auto!important;
-    touch-action:manipulation!important;
+.akdImportCard{
+    background:linear-gradient(145deg,#111a29,#0e151f);
+    border:1px solid #315480;
 }
 
-.detail{
-    background:#07090d!important;
+.akdImportCard h3{
+    color:#dcecff;
 }
 
-.detailHeader{
-    position:sticky!important;
-    top:0!important;
-    z-index:50!important;
-    background:#07090d!important;
-    padding:10px 12px!important;
+.akdImportSteps{
+    margin:0 0 13px;
+    color:#9eacc0;
+    font-size:12px;
+    line-height:1.65;
 }
 
-.back{
-    border-radius:14px!important;
-    font-weight:800!important;
+.filePicker{
+    display:flex;
+    align-items:center;
+    justify-content:center;
+    min-height:48px;
+    width:100%;
+    border:1px dashed #4b83c9;
+    border-radius:12px;
+    color:#9bc7ff;
+    background:#0b1522;
+    font-weight:800;
+    cursor:pointer;
 }
 
-.hero{
-    background:linear-gradient(
-        110deg,
-        rgba(92,19,45,.80),
-        rgba(20,12,23,.94)
-    )!important;
-
-    border-bottom:3px solid #c72f53!important;
-    padding:17px 16px 15px!important;
+.filePicker input{
+    display:none;
 }
 
-.heroSymbol{
-    font-size:29px!important;
-    font-weight:900!important;
+.ocrProgress{
+    min-height:20px;
+    margin:10px 2px 0;
+    color:#8da0b8;
+    font-size:11px;
+    line-height:1.45;
 }
 
-.heroName{
-    color:#96919a!important;
-}
-
-.heroPrice{
-    font-size:38px!important;
-    font-weight:900!important;
-}
-
-.detailTabs{
-    position:sticky!important;
-    top:58px!important;
-    z-index:45!important;
-
-    display:flex!important;
-    overflow-x:auto!important;
-    gap:0!important;
-    padding:0!important;
-
-    background:#0b0e13!important;
-    border-bottom:1px solid #1d2129!important;
-}
-
-.detailTabs button{
-    border-radius:0!important;
-    background:#0b0e13!important;
-    padding:14px 15px!important;
-    font-size:12px!important;
-    font-weight:800!important;
-}
-
-.detailTabs button.active{
-    background:#1d1c36!important;
-    color:#8c84ff!important;
-    border-bottom:2px solid #7068ff!important;
-}
-
-.panel{
-    padding:8px 7px 95px!important;
-}
-
-.marketStrip{
-    border-radius:15px!important;
-    background:#121720!important;
-}
-
-.depthCard{
-    background:#090c11!important;
-    border:1px solid #20242c!important;
-    border-radius:16px!important;
-    overflow:hidden!important;
-}
-
-.depthHead,
-.depthRow{
-    display:grid!important;
-    grid-template-columns:.55fr 1.15fr 1fr 1fr 1.15fr .55fr!important;
-    align-items:center!important;
-}
-
-.depthHead{
-    color:#777d88!important;
-    font-size:10px!important;
-    font-weight:800!important;
-}
-
-.depthHead > div,
-.depthRow > div{
-    text-align:center!important;
-}
-
-.depthRow{
-    min-height:40px!important;
-    font-size:14px!important;
-}
-
-.depthBid{
-    color:#13ce9a!important;
-    font-weight:800!important;
-}
-
-.depthAsk{
-    color:#f04d62!important;
-    font-weight:800!important;
-}
-
-.depthBalance{
-    padding:12px!important;
-}
-
-.balanceBuy{
-    background:#13ce9a!important;
-}
-
-.balanceSell{
-    background:#f04d62!important;
-}
-
-.v4KademeButton{
-    width:125px;
-    margin:9px auto 2px;
-    padding:8px 10px;
-
-    text-align:center;
-
-    background:#151a23;
-    border:1px solid #303743;
-    border-radius:20px;
-
-    color:#d6dae1;
+.draftLabel{
+    display:block;
+    margin:14px 0 7px;
+    color:#b7c4d7;
     font-size:11px;
     font-weight:800;
 }
 
-.v4TradeBox{
-    margin-top:10px;
-
-    background:#090c11;
-    border:1px solid #20242c;
-    border-radius:16px;
-
-    overflow:hidden;
+.draftArea{
+    display:block;
+    width:100%;
+    min-height:176px;
+    resize:vertical;
+    border:1px solid #293b52;
+    border-radius:12px;
+    padding:11px;
+    background:#09111c;
+    color:#d8e4f5;
+    font:12px/1.55 monospace;
 }
 
-.v4TradeTitle{
-    padding:11px 10px;
-
-    color:#989da6;
-    font-size:13px;
-    font-weight:900;
-
-    border-bottom:1px solid #20242c;
-}
-
-.v4TradeHead{
+.akdActions{
     display:grid;
-    grid-template-columns:1fr 1fr 1.1fr 1.4fr 1.4fr;
-
-    padding:8px 5px;
-
-    color:#737985;
-    font-size:9px;
-    font-weight:800;
-
-    border-bottom:1px solid #20242c;
+    grid-template-columns:1fr 1fr;
+    gap:8px;
+    margin-top:10px;
 }
 
-.v4TradeEmpty{
-    padding:17px 12px;
+.actionButton{
+    border:0;
+    border-radius:11px;
+    padding:12px 9px;
+    background:#1f70ef;
+    color:#fff;
+    font-size:12px;
+    font-weight:800;
+    cursor:pointer;
+}
 
-    text-align:center;
+.actionButton.secondary{
+    background:#172435;
+    border:1px solid #30445e;
+    color:#bcd1ec;
+}
 
-    color:#858c97;
-    font-size:11px;
+.manualBadge{
+    background:#192836;
+    border-color:#496886;
+    color:#b7d8fc;
+}
+
+.akdPrivacy{
+    margin-top:11px;
+    color:#7f91a7;
+    font-size:10px;
     line-height:1.5;
 }
 
+
+.kurFlashUp{
+    animation:kurUpFlash .8s ease;
+}
+.kurFlashDown{
+    animation:kurDownFlash .8s ease;
+}
+
+@keyframes kurUpFlash{
+    0%{
+        box-shadow:0 0 0 1px rgba(32,211,145,.95),
+                   0 0 22px rgba(32,211,145,.45);
+        border-color:#20d391;
+    }
+    100%{
+        box-shadow:none;
+    }
+}
+
+@keyframes kurDownFlash{
+    0%{
+        box-shadow:0 0 0 1px rgba(255,92,108,.95),
+                   0 0 22px rgba(255,92,108,.45);
+        border-color:#ff5c6c;
+    }
+    100%{
+        box-shadow:none;
+    }
+}
+
 </style>
+
+<style>
+.mobileBottomNav{
+    position:fixed;
+    left:0;
+    right:0;
+    bottom:0;
+    z-index:9999;
+    height:64px;
+    padding:6px 8px max(6px,env(safe-area-inset-bottom));
+    background:#0b111a;
+    border-top:1px solid #202c3a;
+    display:grid;
+    grid-template-columns:repeat(5,1fr);
+    gap:5px;
+}
+.mobileBottomNav button{
+    border:0;
+    background:transparent;
+    color:#8591a3;
+    font-size:12px;
+    font-weight:600;
+    border-radius:10px;
+    padding:5px 2px;
+}
+.mobileBottomNav button b{
+    display:block;
+    color:#dce5f2;
+    font-size:18px;
+    line-height:20px;
+    margin-bottom:2px;
+}
+.mobileBottomNav button.active{
+    color:#2684ff;
+    background:#111c2b;
+}
+.mobileBottomNav button.active b{color:#2684ff}
+body{padding-bottom:76px!important;}
+.bottom{bottom:64px!important;}
+</style>
+
 </head>
 
 <body>
@@ -1157,14 +2274,54 @@ body{
 <div id="home">
 
 <div class="top">
-<div class="title">BIST Veri Terminali</div>
-<div class="sub">Piyasa • Teknik • Sinyal • AKD • Takas • AI</div>
+<div class="title">BIST Veri Terminali <span style="font-size:11px;color:#64a5ff">PRO</span></div>
+<div class="sub">Piyasa • Teknik • Sinyal • Canlı Tarama • Takas • Virman • AI</div>
+<div id="liveStatus" class="liveStatus">
+<span class="liveDot"></span>
+<span id="liveStatusText">Tüm BIST canlı taramaya hazırlanıyor...</span>
+</div>
 
 <input
 id="search"
 class="search"
 placeholder="🔎 Hisse ara: ASELS, THYAO, TUPRS..."
 oninput="renderStocks()">
+</div>
+
+
+<div id="kurBar" style="
+    margin:12px 14px 4px;
+    display:grid;
+    grid-template-columns:repeat(2,1fr);
+    gap:8px">
+
+    <div class="stat">
+        <span>DOLAR / TL</span>
+        <b id="usdKur">-</b>
+        <small id="usdAlt" style="color:#7f8ca0">yükleniyor...</small>
+<div id="usdDeg" style="font-size:12px;margin-top:4px">—</div>
+    </div>
+
+    <div class="stat">
+        <span>EURO / TL</span>
+        <b id="eurKur">-</b>
+        <small id="eurAlt" style="color:#7f8ca0">yükleniyor...</small>
+<div id="eurDeg" style="font-size:12px;margin-top:4px">—</div>
+    </div>
+
+    <div class="stat">
+        <span>GRAM ALTIN</span>
+        <b id="gramKur">-</b>
+        <small id="gramAlt" style="color:#7f8ca0">yükleniyor...</small>
+<div id="gramDeg" style="font-size:12px;margin-top:4px">—</div>
+    </div>
+
+    <div class="stat">
+        <span>ÇEYREK ALTIN</span>
+        <b id="ceyrekKur">-</b>
+        <small id="ceyrekAlt" style="color:#7f8ca0">yükleniyor...</small>
+<div id="ceyrekDeg" style="font-size:12px;margin-top:4px">—</div>
+    </div>
 </div>
 
 <div class="stats">
@@ -1182,6 +2339,11 @@ oninput="renderStocks()">
 <b id="strong">-</b>
 <span>Güçlü Sinyal</span>
 </div>
+
+<div class="stat">
+<b id="virmanCount">-</b>
+<span>Virman Adayı</span>
+</div>
 </div>
 
 <div class="tabs">
@@ -1190,6 +2352,7 @@ oninput="renderStocks()">
 <button onclick="setFilter('up',this)">Yükselen</button>
 <button onclick="setFilter('down',this)">Düşen</button>
 <button onclick="setFilter('volume',this)">Hacim</button>
+<button onclick="setFilter('virman',this)">Virman</button>
 </div>
 
 <div id="list" class="list">
@@ -1215,12 +2378,11 @@ oninput="renderStocks()">
 <div class="detailTabs proTabs">
 <button class="active" onclick="detailTab('summary',this)">ÖZET</button>
 <button onclick="detailTab('depth',this)">DERİNLİK</button>
-<button onclick="detailTab('chart',this)">GRAFİK</button>
-<button onclick="detailTab('technical',this)">TEKNİK</button>
-<button onclick="detailTab('signals',this)">SİNYALLER</button>
 <button onclick="detailTab('akd',this)">AKD</button>
 <button onclick="detailTab('kademe',this)">KADEME</button>
 <button onclick="detailTab('takas',this)">TAKAS</button>
+<button onclick="detailTab('virman',this)">VİRMAN</button>
+<button onclick="detailTab('signals',this)">SİNYALLER</button>
 </div>
 
 <div id="panel" class="panel"></div>
@@ -1238,6 +2400,11 @@ Veriler analiz amaçlıdır • Yatırım tavsiyesi değildir
 let allStocks = []
 let selected = null
 let filter = "all"
+let marketLoading = false
+let marketDisplayLimit = 150
+let lastPrices = new Map()
+let priceMoves = new Map()
+let marketMeta = {updated:0, refreshSeconds:10, lastError:null}
 
 if(window.Telegram && Telegram.WebApp){
     Telegram.WebApp.ready()
@@ -1259,12 +2426,233 @@ function money(v){
     return "₺"+n(x,0)
 }
 
-async function load(){
-    try{
-        const r=await fetch("/api/market")
-        const j=await r.json()
+function esc(v){
+    return String(v??"")
+        .replaceAll("&","&amp;")
+        .replaceAll("<","&lt;")
+        .replaceAll(">","&gt;")
+        .replaceAll('"',"&quot;")
+        .replaceAll("'","&#039;")
+}
 
-        allStocks=j.stocks || []
+
+
+const kurYuzdeOnceki = {
+    usd:null,
+    eur:null,
+    gram:null,
+    ceyrek:null
+}
+
+const oncekiKur = {
+    usd:null,
+    eur:null,
+    gram:null,
+    ceyrek:null
+}
+
+
+function kurDegisimYaz(key, yeni){
+    const eski = kurYuzdeOnceki[key]
+    kurYuzdeOnceki[key] = Number(yeni)
+
+    const el = document.getElementById(key+"Deg")
+    if(!el) return
+
+    if(eski===null || yeni===null || yeni===undefined){
+        el.innerHTML='<span style="color:#7f8ca0">—</span>'
+        return
+    }
+
+    const fark = Number(yeni)-Number(eski)
+    const yuzde = eski ? (fark/Number(eski))*100 : 0
+
+    if(fark>0){
+        el.innerHTML=
+          '<span style="color:#20d391;font-weight:700">▲ '+
+          n(fark,4)+' (%'+n(yuzde,2)+')</span>'
+    }else if(fark<0){
+        el.innerHTML=
+          '<span style="color:#ff5c6c;font-weight:700">▼ '+
+          n(fark,4)+' (%'+n(yuzde,2)+')</span>'
+    }else{
+        el.innerHTML=
+          '<span style="color:#7f8ca0">■ 0,00 (%0,00)</span>'
+    }
+}
+
+function yonOku(key, yeni, kart){
+    const eski = oncekiKur[key]
+    oncekiKur[key] = yeni
+
+    if(eski===null || yeni===null || yeni===undefined){
+        return '<span style="color:#7f8ca0;font-size:18px">—</span>'
+    }
+
+    if(Number(yeni) > Number(eski)){
+        if(kart){
+            kart.classList.remove("kurFlashDown")
+            kart.classList.add("kurFlashUp")
+            setTimeout(()=>kart.classList.remove("kurFlashUp"),850)
+        }
+        return '<span style="color:#20d391;font-size:20px;font-weight:900">↑</span>'
+    }
+
+    if(Number(yeni) < Number(eski)){
+        if(kart){
+            kart.classList.remove("kurFlashUp")
+            kart.classList.add("kurFlashDown")
+            setTimeout(()=>kart.classList.remove("kurFlashDown"),850)
+        }
+        return '<span style="color:#ff5c6c;font-size:20px;font-weight:900">↓</span>'
+    }
+
+    return '<span style="color:#7f8ca0;font-size:18px">—</span>'
+}
+
+function kurObj(x){
+    if(!x) return {buy:null,sell:null}
+
+    return {
+        buy: x["buy"] ?? x["alis"] ?? null,
+        sell: x["sell"] ?? x["satis"] ?? null
+    }
+}
+
+async function loadKurlar(){
+    try{
+        const r=await fetch("/api/kurlar",{cache:"no-store"})
+        const j=await r.json()
+        const d=j.data || {}
+
+        function val(x,...keys){
+            for(const k of keys){
+                if(x && x[k]!==null && x[k]!==undefined){
+                    return Number(x[k])
+                }
+            }
+            return null
+        }
+
+        function yaz(id,altId,x,digit){
+            if(!x) return
+
+            const sell=val(x,"sell","satis","satış")
+            const buy=val(x,"buy","alis","alış")
+            const el=document.getElementById(id)
+            const alt=document.getElementById(altId)
+
+            if(sell!==null){
+                const yeni="₺"+n(sell,digit)
+                const eski=el.dataset.price
+
+                if(eski!==String(sell)){
+                    let ok='—'
+                    let renk='#7f8ca0'
+
+                    if(eski!==undefined && eski!==""){
+                        if(sell>Number(eski)){
+                            ok='▲'
+                            renk='#20d391'
+                        }else if(sell<Number(eski)){
+                            ok='▼'
+                            renk='#ff5c6c'
+                        }
+                    }
+
+                    el.innerHTML=
+                        '<span>'+yeni+'</span> '+
+                        '<span style="color:'+renk+
+                        ';font-size:13px;font-weight:800;margin-left:6px">'+
+                        ok+
+                        '</span>'
+
+                    el.dataset.price=String(sell)
+                }
+            }
+
+            if(buy!==null){
+                const yeniAlt="Alış ₺"+n(buy,digit)
+                if(alt.textContent!==yeniAlt){
+                    alt.textContent=yeniAlt
+                }
+            }
+        }
+
+        yaz("usdKur","usdAlt",d.usd,4)
+        yaz("eurKur","eurAlt",d.eur,4)
+        yaz("gramKur","gramAlt",d.gram,2)
+        yaz("ceyrekKur","ceyrekAlt",d.ceyrek,2)
+
+    }catch(e){
+        console.log("Kur hatası",e)
+    }
+}
+
+function updateLiveStatus(){
+    const status=document.getElementById("liveStatus")
+    const text=document.getElementById("liveStatusText")
+    if(!status || !text) return
+
+    const now=Math.floor(Date.now()/1000)
+    const age=marketMeta.updated ? Math.max(0,now-marketMeta.updated) : null
+    const interval=Math.max(10,Number(marketMeta.refreshSeconds)||10)
+
+    status.classList.toggle("warningLive",Boolean(marketMeta.lastError))
+
+    if(age===null){
+        text.textContent="Tüm BIST canlı tarama hazırlanıyor..."
+        return
+    }
+
+    const prefix=marketMeta.lastError
+        ? "Son başarılı BIST verisi"
+        : "Canlı toplu tarama"
+    const errorText=marketMeta.lastError
+        ? " • sağlayıcı yeniden deneniyor"
+        : ""
+
+    text.textContent=
+        `${prefix} • ${allStocks.length} hisse • ${age} sn önce • ${interval} sn yenileme${errorText}`
+}
+
+function preparePriceMoves(stocks){
+    const nextPrices=new Map()
+    priceMoves=new Map()
+
+    stocks.forEach(stock=>{
+        const symbol=stock.symbol||""
+        const price=Number(stock.price)
+        if(!symbol || !Number.isFinite(price)) return
+
+        const old=lastPrices.get(symbol)
+        if(old!==undefined && old!==price){
+            priceMoves.set(symbol,price>old ? "tickUp" : "tickDown")
+        }
+        nextPrices.set(symbol,price)
+    })
+
+    lastPrices=nextPrices
+}
+
+async function load(){
+    if(marketLoading) return
+    marketLoading=true
+
+    try{
+        const r=await fetch("/api/market?ts="+Date.now(),{cache:"no-store"})
+        if(!r.ok) throw new Error("Piyasa isteği başarısız")
+
+        const j=await r.json()
+        const stocks=j.stocks || []
+
+        preparePriceMoves(stocks)
+        allStocks=stocks
+        marketMeta={
+            updated:Number(j.updated)||0,
+            refreshSeconds:Number(j.refresh_seconds)||10,
+            lastError:j.last_error||null
+        }
 
         document.getElementById("total").textContent=allStocks.length
 
@@ -1274,11 +2662,27 @@ async function load(){
         document.getElementById("strong").textContent=
             allStocks.filter(x=>x.score>=110).length
 
+        document.getElementById("virmanCount").textContent=
+            allStocks.filter(x=>x.institutional&&x.institutional.candidate).length
+
+        updateLiveStatus()
         renderStocks()
     }catch(e){
-        document.getElementById("list").innerHTML=
-            '<div class="warning">Veriler alınamadı. Biraz sonra yeniden deneyin.</div>'
+        marketMeta.lastError="connection"
+        updateLiveStatus()
+
+        if(!allStocks.length){
+            document.getElementById("list").innerHTML=
+                '<div class="warning">Veriler alınamadı. Uygulama otomatik olarak yeniden deniyor.</div>'
+        }
+    }finally{
+        marketLoading=false
     }
+}
+
+function showMoreStocks(){
+    marketDisplayLimit+=150
+    renderStocks()
 }
 
 function setFilter(f,el){
@@ -1317,22 +2721,49 @@ function renderStocks(){
     if(filter==="volume")
         arr.sort((a,b)=>(b.relative_volume||0)-(a.relative_volume||0))
 
+    if(filter==="virman")
+        arr=arr
+            .filter(x=>x.institutional&&x.institutional.candidate)
+            .sort((a,b)=>(b.institutional.score||0)-(a.institutional.score||0))
+
+    const totalMatched=arr.length
+
+    // Telefonu yüzlerce kartla ilk açılışta yormadan tüm hisseleri bellekte
+    // tutuyoruz. Arama tüm BIST listesini tarar; aşağıdaki düğmeyle listenin
+    // tamamı parça parça açılır.
     if(!q && filter==="all")
-        arr=arr.slice(0,150)
+        arr=arr.slice(0,marketDisplayLimit)
 
     const list=document.getElementById("list")
 
     if(!arr.length){
-        list.innerHTML='<div class="loading">Hisse bulunamadı.</div>'
+        list.innerHTML=filter==="virman"
+            ? '<div class="warning">Şu anda belirlenen güçlü eşikleri geçen virman/kurumsal hareket adayı yok.</div>'
+            : '<div class="loading">Hisse bulunamadı.</div>'
         return
     }
 
     list.innerHTML=arr.map(s=>{
 
         let cls=(s.change||0)>=0 ? "green":"red"
+        const v=s.institutional||{}
+        const vClass=(v.direction||"").includes("SATIŞ") ? "sell":"buy"
+        const candidateClass=v.candidate ? " virmanCandidate":""
+        const normalMetrics=`
+            <div class="small"><span>RSI</span><b>${n(s.rsi,1)}</b></div>
+            <div class="small"><span>Rel. Hacim</span><b>${n(s.relative_volume,2)}x</b></div>
+            <div class="small"><span>Skor</span><b>${s.score}/150</b></div>
+            <div class="small"><span>Sinyal</span><b>${s.signal}</b></div>
+        `
+        const virmanMetrics=`
+            <div class="small"><span>Kurumsal Skor</span><b>${v.score||0}/100</b></div>
+            <div class="small"><span>Rel. Hacim</span><b>${n(s.relative_volume,2)}x</b></div>
+            <div class="small"><span>İşlem</span><b>${money(v.transaction_value)}</b></div>
+            <div class="small"><span>Normal Üstü</span><b>${money(v.abnormal_value)}</b></div>
+        `
 
         return `
-        <div class="stock" data-symbol="${s.symbol}">
+        <div class="stock${candidateClass}" onclick='openDetail(${JSON.stringify(s.symbol)})'>
 
         <div class="stockTop">
 
@@ -1342,253 +2773,117 @@ function renderStocks(){
         </div>
 
         <div>
-        <div class="price">₺${n(s.price)}</div>
+        <div class="price ${priceMoves.get(s.symbol)||""}">₺${n(s.price)}</div>
         <div class="${cls}">%${n(s.change)}</div>
         </div>
 
         </div>
 
+        ${v.candidate ? `<div class="virmanTag ${vClass}">⚠ ${v.direction} • ${v.score}/100</div>` : ""}
+
         <div class="smallgrid">
-
-        <div class="small">
-        <span>RSI</span>
-        <b>${n(s.rsi,1)}</b>
-        </div>
-
-        <div class="small">
-        <span>Rel. Hacim</span>
-        <b>${n(s.relative_volume,2)}x</b>
-        </div>
-
-        <div class="small">
-        <span>Skor</span>
-        <b>${s.score}/150</b>
-        </div>
-
-        <div class="small">
-        <span>Sinyal</span>
-        <b>${s.signal}</b>
-        </div>
-
+        ${filter==="virman" ? virmanMetrics : normalMetrics}
         </div>
 
         </div>
         `
     }).join("")
-}
 
+    if(!q && filter==="all" && arr.length<totalMatched){
+        const remaining=totalMatched-arr.length
+        list.innerHTML+=
+            `<button class="showMore" onclick="showMoreStocks()">${remaining} hisse daha göster</button>`
+    }
+}
 
 async function openDetail(symbol){
 
-    try{
+    const r=await fetch("/api/stock/"+symbol)
+    const j=await r.json()
 
-        stopDepth();
+    if(!j.ok) return
 
-        const r = await fetch(
-            "/api/stock/" + encodeURIComponent(symbol),
-            {cache:"no-store"}
-        );
+    selected=j.stock
 
-        const j = await r.json();
+    document.getElementById("home").style.display="none"
+    document.getElementById("detail").style.display="block"
 
-        if(!j.ok) return;
+    document.getElementById("dSymbol").textContent=selected.symbol
+    document.getElementById("dName").textContent=selected.description||""
+    document.getElementById("dPrice").textContent="₺"+n(selected.price)
 
-        selected = j.stock;
+    const ch=document.getElementById("dChange")
+    ch.textContent="%"+n(selected.change)
 
-        document.getElementById("home").style.display="none";
-        document.getElementById("detail").style.display="block";
+    ch.className=(selected.change||0)>=0?"green":"red"
 
-        document.getElementById("dSymbol").textContent =
-            selected.symbol;
+    detailTab(
+        "summary",
+        document.querySelector(".detailTabs button")
+    )
 
-        document.getElementById("dName").textContent =
-            selected.description || "";
-
-        document.getElementById("dPrice").textContent =
-            n(selected.price) + "₺";
-
-        const ch = document.getElementById("dChange");
-
-        ch.textContent =
-            ((selected.change || 0) >= 0 ? "▲ " : "▼ ")
-            + n(Math.abs(selected.change || 0))
-            + "%";
-
-        ch.className =
-            (selected.change || 0) >= 0
-            ? "green"
-            : "red";
-
-        document.querySelectorAll(".detailTabs button")
-            .forEach(b=>b.classList.remove("active"));
-
-        const buttons =
-            document.querySelectorAll(".detailTabs button");
-
-        const depthBtn = buttons[1];
-
-        if(depthBtn){
-            depthBtn.classList.add("active");
-        }
-
-        loadDepth(selected.symbol);
-
-        depthTimer = setInterval(()=>{
-            loadDepth(selected.symbol);
-        },3000);
-
-        window.scrollTo(0,0);
-
-    }catch(e){
-
-        console.log("Detay hatası:",e);
-
-    }
-
+    window.scrollTo(0,0)
 }
 
 
 let depthTimer = null;
-let depthBusy = false;
 
-function stopDepth(){
+async function loadDepth(symbol,silent=false){
 
-    if(depthTimer){
+    const p=document.getElementById("panel")
 
-        clearInterval(depthTimer);
-        depthTimer = null;
-
+    if(!silent){
+        p.innerHTML=`
+        <div class="loading">
+        Derinlik verisi alınıyor...
+        </div>
+        `
     }
-
-    depthBusy = false;
-}
-
-
-
-async function loadDepth(symbol){
-
-    if(depthBusy) return;
-
-    depthBusy = true;
-
-    const p = document.getElementById("panel");
 
     try{
 
-        const r = await fetch(
-            "/api/live/" + encodeURIComponent(symbol),
-            {cache:"no-store"}
-        );
+        const r=await fetch("/api/live/"+symbol)
+        const j=await r.json()
 
-        const j = await r.json();
+        if(!j.ok) throw new Error("Veri alınamadı")
 
-        if(!j.ok){
-            throw new Error("Veri alınamadı");
-        }
+        const x=j.live
 
-        const x = j.live || {};
+        const bidLot = Number(x.bid_size || 0)
+        const askLot = Number(x.ask_size || 0)
 
-        const bidLot = Number(x.bid_size || 0);
-        const askLot = Number(x.ask_size || 0);
+        const total = bidLot + askLot
 
-        const total = bidLot + askLot;
+        let buyPct = total ? (bidLot/total)*100 : 50
+        let sellPct = 100-buyPct
 
-        const buyPct =
-            total ? (bidLot / total) * 100 : 50;
-
-        const sellPct =
-            100 - buyPct;
-
-        let rows = "";
-
-        for(let i=0;i<5;i++){
-
-            const real = i === 0;
-
-            rows += `
-
-            <div class="depthRow">
-
-                <div class="depthBuyBg"
-                style="width:${real ? buyPct/2 : 0}%">
-                </div>
-
-                <div class="depthSellBg"
-                style="width:${real ? sellPct/2 : 0}%">
-                </div>
-
-                <div>-</div>
-
-                <div class="depthBid">
-                    ${real && bidLot
-                        ? n(bidLot,0)
-                        : "-"}
-                </div>
-
-                <div class="depthBid">
-                    ${real && x.bid!==null
-                        && x.bid!==undefined
-                        ? n(x.bid)
-                        : "-"}
-                </div>
-
-                <div class="depthAsk">
-                    ${real && x.ask!==null
-                        && x.ask!==undefined
-                        ? n(x.ask)
-                        : "-"}
-                </div>
-
-                <div class="depthAsk">
-                    ${real && askLot
-                        ? n(askLot,0)
-                        : "-"}
-                </div>
-
-                <div>-</div>
-
-            </div>
-
-            `;
-
-        }
-
-        p.innerHTML = `
+        p.innerHTML=`
 
         <div class="marketStrip">
 
             <div>
-                <span>TAVAN</span>
-                <b>-</b>
-            </div>
-
-            <div>
-                <span>TABAN</span>
-                <b>-</b>
-            </div>
-
-            <div>
-                <span>YÜKSEK</span>
-                <b>-</b>
-            </div>
-
-            <div>
-                <span>DÜŞÜK</span>
-                <b>-</b>
-            </div>
-
-            <div>
                 <span>SON</span>
+                <b>₺${n(selected.price)}</b>
+            </div>
 
-                <b>
-                ${
-                    x.last!==null &&
-                    x.last!==undefined
-                    ? n(x.last)
-                    : n(selected.price)
-                }
-                </b>
+            <div>
+                <span>DEĞİŞİM</span>
+                <b>%${n(selected.change)}</b>
+            </div>
 
+            <div>
+                <span>RSI</span>
+                <b>${n(selected.rsi,1)}</b>
+            </div>
+
+            <div>
+                <span>REL.HACİM</span>
+                <b>${n(selected.relative_volume,2)}x</b>
+            </div>
+
+            <div>
+                <span>SKOR</span>
+                <b>${selected.score}</b>
             </div>
 
         </div>
@@ -1597,109 +2892,102 @@ async function loadDepth(symbol){
         <div class="depthCard">
 
             <div class="depthHead">
-
                 <div>EMİR</div>
-                <div>ADET</div>
+                <div>LOT</div>
                 <div>ALIŞ</div>
                 <div>SATIŞ</div>
-                <div>ADET</div>
+                <div>LOT</div>
                 <div>EMİR</div>
-
             </div>
 
-            ${rows}
+
+            <div class="depthRow">
+
+                <div class="depthBuyBg"
+                     style="width:${buyPct/2}%"></div>
+
+                <div class="depthSellBg"
+                     style="width:${sellPct/2}%"></div>
+
+                <div>-</div>
+
+                <div class="depthBid">
+                    ${bidLot ? n(bidLot,0) : "-"}
+                </div>
+
+                <div class="depthBid">
+                    ${x.bid!==null ? n(x.bid) : "-"}
+                </div>
+
+                <div class="depthAsk">
+                    ${x.ask!==null ? n(x.ask) : "-"}
+                </div>
+
+                <div class="depthAsk">
+                    ${askLot ? n(askLot,0) : "-"}
+                </div>
+
+                <div>-</div>
+
+            </div>
 
 
             <div class="depthBalance">
 
                 <div class="balanceBar">
 
-                    <div
-                    class="balanceBuy"
-                    style="width:${buyPct}%">
-                    </div>
+                    <div class="balanceBuy"
+                         style="width:${buyPct}%"></div>
 
-                    <div
-                    class="balanceSell"
-                    style="width:${sellPct}%">
-                    </div>
+                    <div class="balanceSell"
+                         style="width:${sellPct}%"></div>
 
                 </div>
-
 
                 <div class="balanceText">
 
                     <div class="buy">
-                        Alış %${n(buyPct,1)}
+                        Alış %${n(buyPct,0)}
                     </div>
 
                     <div class="sell">
-                        Satış %${n(sellPct,1)}
+                        Satış %${n(sellPct,0)}
                     </div>
 
                 </div>
 
-
-                <div class="v4KademeButton">
-                    5 KADEME ▾
-                </div>
-
             </div>
 
         </div>
 
 
-        <div class="v4TradeBox">
-
-            <div class="v4TradeTitle">
-                SON 100 İŞLEM AKIŞI
-            </div>
-
-            <div class="v4TradeHead">
-
-                <div>SAAT</div>
-                <div>FİYAT</div>
-                <div>ADET</div>
-                <div>ALAN</div>
-                <div>SATAN</div>
-
-            </div>
-
-            <div class="v4TradeEmpty">
-
-                İşlem bazında alıcı / satıcı kurum verisi
-                mevcut veri kaynağında bulunmuyor.
-
-                <br><br>
-
-                Görünüm hazır.
-                Gerçek kurum verisi bağlandığında
-                bu bölüm doğrudan dolacak.
-
-            </div>
-
+        <div class="sectionTitle">
+        SON İŞLEMLER
         </div>
 
-        `;
+        <div class="locked">
+        Saat • fiyat • lot • alıcı kurum • satıcı kurum tablosu
+        için işlem tarafı verisi gerekiyor.
+
+        <br><br>
+
+        Şu anda gerçek kaynaktan yalnızca mevcut
+        alış/satış ve alış/satış lotları gösteriliyor.
+        Sahte kademe veya kurum adı üretilmiyor.
+        </div>
+        `
 
     }catch(e){
 
-        p.innerHTML = `
-
-        <div class="warning">
-        Derinlik verisi şu anda alınamadı.
-        </div>
-
-        `;
-
-    }finally{
-
-        depthBusy = false;
-
+        if(!silent){
+            p.innerHTML=`
+            <div class="warning">
+            Derinlik verisi şu anda alınamadı.
+            </div>
+            `
+        }
     }
-
 }
-
 
 async function loadLive(symbol){
     const p=document.getElementById("panel")
@@ -1786,27 +3074,648 @@ async function loadLive(symbol){
 }
 
 
-function stopDepthTimer(){
+/* ===== ÜCRETSİZ AKD FOTOĞRAF AKTAR =====
+   Fotoğraf yalnızca telefondaki tarayıcıda OCR edilir. Sunucuya görsel,
+   Borsa Robotu girişi veya şifre gönderilmez; sonuç aynı telefonda saklanır. */
+const MANUAL_AKD_STORAGE_PREFIX="bist_manual_akd_v1_"
+const MANUAL_AKD_STALE_MS=12*60*60*1000
+
+function manualAkdKey(symbol){
+    return MANUAL_AKD_STORAGE_PREFIX+String(symbol||"").toUpperCase().replace(/[^A-Z0-9]/g,"")
+}
+
+function foldTr(value){
+    return String(value||"")
+        .toLocaleUpperCase("tr-TR")
+        .normalize("NFD")
+        .replace(/[\u0300-\u036f]/g,"")
+}
+
+function parseTrNumber(value){
+    let raw=String(value??"").replace(/[^\d,.-]/g,"")
+    if(!raw || raw==="-" || raw===".") return null
+
+    const comma=raw.lastIndexOf(",")
+    const dot=raw.lastIndexOf(".")
+
+    if(comma>=0 && dot>=0){
+        if(comma>dot) raw=raw.replace(/\./g,"").replace(",",".")
+        else raw=raw.replace(/,/g,"")
+    }else if(comma>=0){
+        const tail=raw.length-comma-1
+        raw=tail<=2 ? raw.replace(",",".") : raw.replace(/,/g,"")
+    }else if(dot>=0){
+        const tail=raw.length-dot-1
+        if(tail===3) raw=raw.replace(/\./g,"")
+    }
+
+    const number=Number(raw)
+    return Number.isFinite(number) ? number : null
+}
+
+function canonicalAkdSide(value){
+    const text=foldTr(value)
+    if(text.includes("ALIC") || text.includes("ALIS") || text.includes("BUY")) return "buy"
+    if(text.includes("SATIC") || text.includes("SATIS") || text.includes("SELL")) return "sell"
+    return ""
+}
+
+function cleanInstitution(value){
+    return String(value||"")
+        .replace(/^\s*\d+\s*[.)-]?\s*/,"")
+        .replace(/[|;]/g," ")
+        .replace(/\s+/g," ")
+        .trim()
+        .slice(0,56)
+}
+
+function normalizeManualRows(rows){
+    const byKey=new Map()
+
+    ;(rows||[]).forEach(raw=>{
+        const side=canonicalAkdSide(raw.side||raw.direction)
+        const institution=cleanInstitution(raw.institution||raw.name||raw.kurum)
+        const lot=parseTrNumber(raw.lot??raw.quantity??raw.net)
+        const average=parseTrNumber(raw.average??raw.avg??raw.cost??raw.maliyet)
+        const percent=parseTrNumber(raw.percent??raw.ratio??raw.oran)
+
+        if(!side || !institution || !lot || lot<=0) return
+
+        const row={
+            side,
+            institution,
+            lot:Math.round(Math.min(lot,999999999)),
+            average:average&&average>0 ? average : null,
+            percent:percent!==null&&percent>=0&&percent<=100 ? percent : null
+        }
+        const key=side+"|"+foldTr(institution)
+        const old=byKey.get(key)
+        if(!old || row.lot>old.lot) byKey.set(key,row)
+    })
+
+    return [...byKey.values()]
+        .sort((a,b)=>b.lot-a.lot)
+        .slice(0,40)
+}
+
+function getManualAkd(symbol){
+    try{
+        const snapshot=JSON.parse(localStorage.getItem(manualAkdKey(symbol))||"null")
+        if(!snapshot || !Array.isArray(snapshot.rows)) return null
+        snapshot.rows=normalizeManualRows(snapshot.rows)
+        if(!snapshot.rows.length) return null
+        snapshot.symbol=String(snapshot.symbol||symbol).toUpperCase()
+        snapshot.capturedAt=Number(snapshot.capturedAt||0)
+        snapshot.stale=!!(snapshot.capturedAt && Date.now()-snapshot.capturedAt>MANUAL_AKD_STALE_MS)
+        return snapshot
+    }catch(e){
+        return null
+    }
+}
+
+function manualAkdRows(snapshot){
+    return normalizeManualRows(snapshot?.rows||[]).map(row=>({
+        institution:row.institution,
+        buy:row.side==="buy" ? row.lot : 0,
+        sell:row.side==="sell" ? row.lot : 0,
+        net:row.side==="buy" ? row.lot : -row.lot,
+        average:row.average,
+        percent:row.percent,
+        side:row.side
+    })).sort((a,b)=>Math.abs(b.net)-Math.abs(a.net))
+}
+
+function manualAkdStats(snapshot){
+    const rows=manualAkdRows(snapshot)
+    const buyers=rows.filter(x=>x.net>0).sort((a,b)=>b.net-a.net)
+    const sellers=rows.filter(x=>x.net<0).sort((a,b)=>a.net-b.net)
+    const totalBuy=buyers.reduce((sum,x)=>sum+x.net,0)
+    const totalSell=Math.abs(sellers.reduce((sum,x)=>sum+x.net,0))
+    const ratio=(totalBuy-totalSell)/Math.max(totalBuy+totalSell,1)
+    let direction="DENGE"
+    if(ratio>=.08) direction="ALIM YOĞUNLUĞU"
+    if(ratio<=-.08) direction="SATIŞ YOĞUNLUĞU"
+    return {rows,buyers,sellers,totalBuy,totalSell,ratio,direction}
+}
+
+function manualAkdTime(snapshot){
+    if(!snapshot?.capturedAt) return "tarih bilinmiyor"
+    return new Date(snapshot.capturedAt).toLocaleString("tr-TR",{
+        day:"2-digit",month:"2-digit",hour:"2-digit",minute:"2-digit"
+    })
+}
+
+function manualRowsToDraft(rows){
+    return normalizeManualRows(rows).map(row=>[
+        row.side==="buy" ? "ALIS" : "SATIS",
+        row.institution,
+        row.lot,
+        row.average===null ? "" : String(row.average).replace(".",","),
+        row.percent===null ? "" : String(row.percent).replace(".",",")
+    ].join(";")).join("\n")
+}
+
+function parseManualAkdDraft(text){
+    const rows=[]
+    String(text||"").split(/\r?\n/).forEach(line=>{
+        const fields=line.split(/[;|]/).map(x=>x.trim())
+        if(fields.length<3) return
+        rows.push({
+            side:fields[0],
+            institution:fields[1],
+            lot:fields[2],
+            average:fields[3],
+            percent:fields[4]
+        })
+    })
+    return normalizeManualRows(rows)
+}
+
+function groupOcrWords(words){
+    const valid=(words||[]).filter(word=>{
+        const box=word?.bbox||{}
+        return word?.text && Number.isFinite(box.x0) && Number.isFinite(box.y0)
+    }).map(word=>({
+        text:String(word.text).trim(),
+        x0:word.bbox.x0,
+        x1:word.bbox.x1,
+        y0:word.bbox.y0,
+        y1:word.bbox.y1,
+        confidence:Number(word.confidence||0)
+    })).filter(word=>word.text)
+
+    const maxX=Math.max(...valid.map(word=>word.x1),1)
+    const lines=[]
+    valid.sort((a,b)=>a.y0-b.y0||a.x0-b.x0).forEach(word=>{
+        const center=(word.y0+word.y1)/2
+        const height=Math.max(8,word.y1-word.y0)
+        let line=null
+        for(let index=lines.length-1;index>=0;index--){
+            const item=lines[index]
+            if(Math.abs(item.center-center)<=Math.max(13,(item.height+height)*.58)){
+                line=item
+                break
+            }
+        }
+        if(!line){
+            line={center,height,words:[]}
+            lines.push(line)
+        }
+        line.words.push(word)
+        line.center=(line.center*(line.words.length-1)+center)/line.words.length
+        line.height=Math.max(line.height,height)
+    })
+
+    return lines.map(line=>{
+        const lineWords=line.words.sort((a,b)=>a.x0-b.x0).map(word=>({
+            ...word,
+            x:((word.x0+word.x1)/2)/maxX
+        }))
+        return {words:lineWords,text:lineWords.map(word=>word.text).join(" ")}
+    })
+}
+
+function ocrLineToManualRow(line,side){
+    const folded=foldTr(line.text)
+    if(!side || !line?.words?.length) return null
+    if(/ALIC|SATIC|TUMUNU|GOSTER|TOPLAM|HACIM|ISLEM|MALIYET|ORAN|PGC/.test(folded)) return null
+
+    const numeric=line.words.map(word=>({
+        ...word,
+        value:parseTrNumber(word.text)
+    })).filter(word=>word.value!==null && /\d/.test(word.text))
+
+    let lotWord=numeric.find(word=>word.x>=.36 && word.x<.69 && word.value>=10)
+    if(!lotWord){
+        lotWord=[...numeric].filter(word=>word.value>=10)
+            .sort((a,b)=>b.value-a.value)[0]
+    }
+    if(!lotWord || lotWord.value<10) return null
+
+    const name=cleanInstitution(line.words
+        .filter(word=>word.x<.46 && !/\d/.test(word.text))
+        .map(word=>word.text).join(" "))
+    if(!name || /^(DIGER|TOPLAM|TUMUNU)$/i.test(foldTr(name))) return null
+
+    const avgWord=numeric.find(word=>word.x>=.62 && word.x<.86 && word.value>0 && word.value<1000000)
+    const pctWord=numeric.find(word=>word.x>=.80 && word.value>=0 && word.value<=100)
+
+    return {
+        side,
+        institution:name,
+        lot:lotWord.value,
+        average:avgWord?.value,
+        percent:pctWord?.value
+    }
+}
+
+function extractManualAkdRows(ocrData){
+    let side=""
+    const rows=[]
+    const lines=groupOcrWords(ocrData?.words||[])
+
+    lines.forEach(line=>{
+        const folded=foldTr(line.text)
+        if(folded.includes("ALICILAR") || folded.includes("ALANLAR")){
+            side="buy"
+            return
+        }
+        if(folded.includes("SATICILAR") || folded.includes("SATANLAR")){
+            side="sell"
+            return
+        }
+        const row=ocrLineToManualRow(line,side)
+        if(row) rows.push(row)
+    })
+
+    return normalizeManualRows(rows)
+}
+
+function manualAkdUploadHtml(symbol){
+    const snapshot=getManualAkd(symbol)
+    const previous=snapshot
+        ? `<div class="ocrProgress">Bu hissede ${manualAkdTime(snapshot)} tarihli kayıt var. Yeni fotoğraf kaydedilirse üzerine yazılır.</div>`
+        : ""
+
+    return `
+    <div class="card akdImportCard">
+        <h3>📷 AKD Fotoğraf Aktar — ${esc(symbol)}</h3>
+        <div class="akdImportSteps">
+            Borsa Robotu’nda aynı hissenin <b>AKD</b> ekranını aç. Alıcılar ve Satıcılar görünürken ekran görüntüsünü seç.
+            İlk okumada 15–30 saniye sürebilir; alttaki satırları kontrol edip gerekirse düzelt.
+        </div>
+        <label class="filePicker">
+            📷 EKRAN GÖRÜNTÜSÜ SEÇ
+            <input id="akdImageInput" type="file" accept="image/png,image/jpeg,image/webp" onchange="processAkdImage(event,'${esc(symbol)}')">
+        </label>
+        <div id="ocrStatus" class="ocrProgress">Henüz fotoğraf seçilmedi.</div>
+        ${previous}
+        <label class="draftLabel">OKUNAN SATIRLAR — format: ALIS;KURUM;LOT;MALIYET;ORAN</label>
+        <textarea id="akdDraft" class="draftArea" spellcheck="false" placeholder="ALIS;Yapı Kr.;222103;111,96;37,23\nSATIS;Info;221605;111,48;37,15"></textarea>
+        <div class="akdActions">
+            <button class="actionButton" onclick="saveManualAkd('${esc(symbol)}')">AKD'Yİ KAYDET</button>
+            <button class="actionButton secondary" onclick="loadAkd('${esc(symbol)}')">VAZGEÇ</button>
+        </div>
+        <div class="akdPrivacy">Görsel sunucuya yüklenmez. OCR telefonundaki tarayıcıda çalışır; sadece senin cihazındaki özet satırlar kaydedilir.</div>
+    </div>`
+}
+
+function manualAkdTableHtml(snapshot){
+    const stats=manualAkdStats(snapshot)
+    const rows=stats.rows
+    const table=rows.map(x=>`
+        <tr>
+            <td>${esc(x.institution)}</td>
+            <td class="green">${x.buy?n(x.buy,0):'-'}</td>
+            <td class="red">${x.sell?n(x.sell,0):'-'}</td>
+            <td class="${x.net>=0?'green':'red'}">${x.net>=0?'+':''}${n(x.net,0)}</td>
+            <td>${x.average?('₺'+n(x.average,3)):'-'}</td>
+            <td>${x.percent===null?'—':'%'+n(x.percent,2)}</td>
+        </tr>`).join("")
+
+    const directionClass=stats.direction.includes("SATIŞ") ? "red" : (stats.direction.includes("ALIM") ? "green" : "")
+    const staleNote=snapshot.stale
+        ? '<div class="warning" style="margin-top:10px">Bu AKD görüntüsü 12 saatten eski. Yeni ekran görüntüsü aktararak güncelle.</div>'
+        : ''
+
+    return `
+    <div class="providerBadge manualBadge">● AKD FOTOĞRAF AKTAR • ${manualAkdTime(snapshot)}</div>
+    <div class="marketStrip">
+        <div><span>KURUM</span><b>${rows.length}</b></div>
+        <div><span>ALIŞ LOT</span><b class="green">${n(stats.totalBuy,0)}</b></div>
+        <div><span>SATIŞ LOT</span><b class="red">${n(stats.totalSell,0)}</b></div>
+        <div><span>EKRAN YÖNÜ</span><b class="${directionClass}">${stats.direction}</b></div>
+        <div><span>KAYNAK</span><b>FOTOĞRAF</b></div>
+    </div>
+    <div class="dataTableWrap">
+        <table class="dataTable">
+            <thead><tr><th>KURUM</th><th>ALIŞ LOT</th><th>SATIŞ LOT</th><th>NET LOT</th><th>ORT.</th><th>ORAN</th></tr></thead>
+            <tbody>${table}</tbody>
+        </table>
+    </div>
+    ${staleNote}
+    <div class="akdActions">
+        <button class="actionButton" onclick="openManualAkdImport('${esc(snapshot.symbol)}')">YENİ FOTOĞRAF AKTAR</button>
+        <button class="actionButton secondary" onclick="clearManualAkd('${esc(snapshot.symbol)}')">KAYDI SİL</button>
+    </div>
+    <div class="akdPrivacy">Bu, seçtiğin ekran görüntüsünün zaman damgalı AKD özetidir. Gerçek zamanlı API değildir ve tek başına virman kanıtı sayılmaz.</div>`
+}
+
+function openManualAkdImport(symbol){
     if(depthTimer){
         clearInterval(depthTimer)
         depthTimer=null
     }
+    const p=document.getElementById("panel")
+    p.innerHTML=manualAkdUploadHtml(symbol)
+    window.scrollTo({top:0,behavior:"smooth"})
+}
+
+async function processAkdImage(event,symbol){
+    const file=event?.target?.files?.[0]
+    const status=document.getElementById("ocrStatus")
+    if(!file || !status) return
+    if(file.size>12*1024*1024){
+        status.textContent="Fotoğraf 12 MB'dan küçük olmalı. Ekran görüntüsünü seç."
+        return
+    }
+    if(!window.Tesseract){
+        status.textContent="OCR kütüphanesi henüz yüklenemedi. İnterneti kontrol edip tekrar dene veya satırları elle gir."
+        return
+    }
+
+    status.textContent="Fotoğraf telefonda okunuyor..."
+    try{
+        const result=await window.Tesseract.recognize(file,"tur+eng",{
+            logger:message=>{
+                if(!message?.status) return
+                const percentage=typeof message.progress==="number" ? " %"+Math.round(message.progress*100) : ""
+                status.textContent="OCR: "+message.status+percentage
+            }
+        })
+        const rows=extractManualAkdRows(result?.data||{})
+        const draft=document.getElementById("akdDraft")
+        if(draft && rows.length) draft.value=manualRowsToDraft(rows)
+        status.textContent=rows.length
+            ? rows.length+" kurum satırı bulundu. Kaydetmeden önce alttaki lot ve kurumları kontrol et."
+            : "Satırlar otomatik okunamadı. Alttaki kutuya örnekteki formatla elle gir; fotoğraf telefondan çıkmadı."
+    }catch(error){
+        status.textContent="OCR okunamadı. Aynı bilgileri alttaki kutuya elle yazabilirsin."
+    }
+}
+
+function saveManualAkd(symbol){
+    const draft=document.getElementById("akdDraft")
+    const status=document.getElementById("ocrStatus")
+    const rows=parseManualAkdDraft(draft?.value||"")
+    if(!rows.length){
+        if(status) status.textContent="Kaydedilecek satır bulunamadı. Her satır ALIS;KURUM;LOT;MALIYET;ORAN şeklinde olmalı."
+        return
+    }
+
+    const snapshot={
+        version:1,
+        symbol:String(symbol||"").toUpperCase(),
+        capturedAt:Date.now(),
+        source:"AKD ekran görüntüsü",
+        rows
+    }
+    try{
+        localStorage.setItem(manualAkdKey(symbol),JSON.stringify(snapshot))
+    }catch(error){
+        if(status) status.textContent="Telefon bu kaydı saklayamadı. Tarayıcı depolama alanını kontrol et."
+        return
+    }
+
+    const akdTab=[...document.querySelectorAll(".detailTabs button")]
+        .find(button=>foldTr(button.textContent).includes("AKD"))
+    if(akdTab) detailTab("akd",akdTab)
+    else loadAkd(symbol)
+}
+
+function clearManualAkd(symbol){
+    if(!confirm(String(symbol).toUpperCase()+" için kaydedilen AKD görüntü özetini silmek istiyor musun?")) return
+    localStorage.removeItem(manualAkdKey(symbol))
+    loadAkd(symbol)
+}
+
+function manualAkdVirmanHtml(symbol){
+    const snapshot=getManualAkd(symbol)
+    if(!snapshot){
+        return `
+        <div class="card akdImportCard">
+            <h3>📷 Gerçek AKD'yi Virman Radarına Kat</h3>
+            <div class="desc" style="line-height:1.6">Borsa Robotu'ndaki aynı hissenin AKD ekran görüntüsünü aktar. En güçlü alıcı ve satıcılar, hacim radarının yanında gösterilsin.</div>
+            <div class="akdActions" style="grid-template-columns:1fr;margin-top:12px">
+                <button class="actionButton" onclick="openManualAkdImport('${esc(symbol)}')">AKD FOTOĞRAF AKTAR</button>
+            </div>
+        </div>`
+    }
+
+    const stats=manualAkdStats(snapshot)
+    const topBuy=stats.buyers[0]
+    const topSell=stats.sellers[0]
+    const radar=selected?.institutional?.direction||"YÖN BELİRSİZ"
+    const snapshotSell=stats.direction.includes("SATIŞ")
+    const snapshotBuy=stats.direction.includes("ALIM")
+    const aligned=(radar.includes("SATIŞ")&&snapshotSell)||(radar.includes("ALIM")&&snapshotBuy)
+    const alignment=aligned ? "Radar yönüyle UYUMLU" : (stats.direction==="DENGE" ? "Ekran dengeli" : "Radar yönünü TEYİT ETMİYOR")
+    const alignmentClass=aligned ? "green" : "red"
+
+    return `
+    <div class="card akdImportCard">
+        <div class="providerBadge manualBadge">● YÜKLENEN AKD • ${manualAkdTime(snapshot)}</div>
+        <h3>AKD + Virman Radar Kontrolü</h3>
+        <div class="rows">
+            <div class="row"><span>EN GÜÇLÜ ALICI</span><b class="green">${topBuy?esc(topBuy.institution):'—'}</b><div class="desc">${topBuy?'+'+n(topBuy.net,0)+' lot':'—'}</div></div>
+            <div class="row"><span>EN GÜÇLÜ SATICI</span><b class="red">${topSell?esc(topSell.institution):'—'}</b><div class="desc">${topSell?n(Math.abs(topSell.net),0)+' lot':'—'}</div></div>
+            <div class="row"><span>GÖRÜNTÜ YÖNÜ</span><b>${stats.direction}</b><div class="desc">Yüklenen kurum satırları</div></div>
+            <div class="row"><span>RADAR UYUMU</span><b class="${alignmentClass}">${alignment}</b><div class="desc">${esc(radar)}</div></div>
+        </div>
+        <div class="akdActions">
+            <button class="actionButton secondary" onclick="openManualAkdImport('${esc(symbol)}')">FOTOĞRAFI GÜNCELLE</button>
+            <button class="actionButton secondary" onclick="loadAkd('${esc(symbol)}')">AKD TABLOSUNU AÇ</button>
+        </div>
+    </div>`
+}
+
+async function loadAkd(symbol,silent=false){
+    const p=document.getElementById("panel")
+    const manualSnapshot=getManualAkd(symbol)
+    if(!silent) p.innerHTML='<div class="loading">AKD verisi kontrol ediliyor...</div>'
+
+    try{
+        const r=await fetch("/api/akd/"+encodeURIComponent(symbol),{cache:"no-store"})
+        const j=await r.json()
+
+        if(!j.configured){
+            p.innerHTML=manualSnapshot ? manualAkdTableHtml(manualSnapshot) : manualAkdUploadHtml(symbol)
+            return
+        }
+
+        if(!j.ok) throw new Error(j.error||"AKD alınamadı")
+        const rows=j.rows||[]
+        if(!rows.length){
+            p.innerHTML=manualSnapshot
+                ? manualAkdTableHtml(manualSnapshot)
+                : '<div class="warning">Sağlayıcı bağlantısı açık fakat bu hisse için AKD satırı dönmedi.</div>'
+            return
+        }
+
+        const netBuy=rows.filter(x=>(x.net||0)>0).reduce((a,x)=>a+Number(x.net||0),0)
+        const netSell=Math.abs(rows.filter(x=>(x.net||0)<0).reduce((a,x)=>a+Number(x.net||0),0))
+        const table=rows.slice(0,30).map(x=>`
+            <tr>
+                <td>${esc(x.institution)}</td>
+                <td class="green">${n(x.buy,0)}</td>
+                <td class="red">${n(x.sell,0)}</td>
+                <td class="${Number(x.net)>=0?'green':'red'}">${Number(x.net)>=0?'+':''}${n(x.net,0)}</td>
+                <td>${money(x.net_tl)}</td>
+                <td>${x.average?('₺'+n(x.average,3)):'-'}</td>
+            </tr>`).join("")
+
+        p.innerHTML=`
+        <div class="providerBadge">● CANLI AKD • ${esc(j.provider||'Lisanslı sağlayıcı')}</div>
+        <div class="marketStrip">
+            <div><span>KURUM</span><b>${rows.length}</b></div>
+            <div><span>NET ALIŞ</span><b class="green">${n(netBuy,0)}</b></div>
+            <div><span>NET SATIŞ</span><b class="red">${n(netSell,0)}</b></div>
+        </div>
+        <div class="dataTableWrap">
+            <table class="dataTable">
+                <thead><tr><th>KURUM</th><th>ALIŞ LOT</th><th>SATIŞ LOT</th><th>NET LOT</th><th>NET TL</th><th>ORT.</th></tr></thead>
+                <tbody>${table}</tbody>
+            </table>
+        </div>
+        <div class="warning" style="margin-top:10px">AKD seans içi aracı kurum işlemlerini gösterir; tek başına virman kanıtı değildir.</div>`
+    }catch(e){
+        if(!silent) p.innerHTML=manualSnapshot
+            ? manualAkdTableHtml(manualSnapshot)
+            : '<div class="warning">Canlı AKD alınamadı: '+esc(e.message)+'</div>'
+    }
+}
+
+async function loadTakas(symbol,silent=false){
+    const p=document.getElementById("panel")
+    if(!silent) p.innerHTML='<div class="loading">Takas verisi alınıyor...</div>'
+
+    try{
+        const r=await fetch("/api/takas/"+encodeURIComponent(symbol),{cache:"no-store"})
+        const j=await r.json()
+
+        if(!j.configured){
+            p.innerHTML=`
+            <div class="card"><h3>Takas / Saklama</h3></div>
+            <div class="locked">
+            Takas ekranı hazır; gerçek kurum saklama ve değişim verisi için
+            lisanslı takas API bağlantısı tanımlanmalıdır.
+            </div>`
+            return
+        }
+
+        if(!j.ok) throw new Error(j.error||"Takas alınamadı")
+        const rows=j.rows||[]
+        if(!rows.length){
+            p.innerHTML='<div class="warning">Sağlayıcı bağlantısı açık fakat bu hisse için takas satırı dönmedi.</div>'
+            return
+        }
+
+        const table=rows.slice(0,40).map(x=>`
+            <tr>
+                <td>${esc(x.institution)}</td>
+                <td>${n(x.holding,0)}</td>
+                <td class="${Number(x.change)>=0?'green':'red'}">${Number(x.change)>=0?'+':''}${n(x.change,0)}</td>
+                <td>%${n(x.percent,2)}</td>
+            </tr>`).join("")
+
+        p.innerHTML=`
+        <div class="providerBadge">● TAKAS VERİSİ • ${esc(j.provider||'Lisanslı sağlayıcı')}</div>
+        <div class="dataTableWrap">
+            <table class="dataTable">
+                <thead><tr><th>KURUM</th><th>SAKLAMA LOT</th><th>DEĞİŞİM</th><th>PAY</th></tr></thead>
+                <tbody>${table}</tbody>
+            </table>
+        </div>
+        <div class="warning" style="margin-top:10px">Kesinleşmiş takas verisi işlem gününe göre gecikmeli olabilir; sağlayıcının tarih bilgisini esas al.</div>`
+    }catch(e){
+        if(!silent) p.innerHTML='<div class="warning">Takas verisi alınamadı: '+esc(e.message)+'</div>'
+    }
+}
+
+function estimatedVirmanHtml(s){
+    const v=s.institutional||{}
+    const directionClass=(v.direction||"").includes("SATIŞ")?'red':'green'
+    const reasons=(v.reasons&&v.reasons.length)
+        ? v.reasons.map(x=>'✓ '+esc(x)).join('<br>')
+        : 'Belirgin kurumsal hareket ölçütü yok.'
+
+    return `
+    <div class="signalBox">
+        <div>TAHMİNİ KURUMSAL / VİRMAN SKORU</div>
+        <div class="signalBig">${v.score||0}/100</div>
+        <b class="${directionClass}">${esc(v.direction||'YÖN BELİRSİZ')}</b>
+        <div style="margin-top:7px;color:#8e9aae">${esc(v.level||'NORMAL')}</div>
+    </div>
+    <div class="card">
+        <div class="rows">
+            <div class="row"><span>GÖRELİ HACİM</span><b>${n(s.relative_volume,2)}x</b></div>
+            <div class="row"><span>TOPLAM İŞLEM</span><b>${money(v.transaction_value)}</b></div>
+            <div class="row"><span>NORMAL ÜSTÜ LOT</span><b>${n(v.abnormal_volume,0)}</b></div>
+            <div class="row"><span>NORMAL ÜSTÜ TL</span><b>${money(v.abnormal_value)}</b></div>
+        </div>
+    </div>
+    <div class="card"><h3>Skorun Nedenleri</h3><div class="desc" style="line-height:1.7">${reasons}</div></div>`
+}
+
+async function loadVirman(symbol,silent=false){
+    const p=document.getElementById("panel")
+    const estimate=estimatedVirmanHtml(selected)
+    const manualAkd=manualAkdVirmanHtml(symbol)
+    if(!silent) p.innerHTML=estimate+manualAkd+'<div class="loading">AKD ve takas eşleşmesi kontrol ediliyor...</div>'
+
+    try{
+        const r=await fetch("/api/virman-check/"+encodeURIComponent(symbol),{cache:"no-store"})
+        const j=await r.json()
+
+        if(!j.configured){
+            p.innerHTML=estimate+manualAkd+`
+            <div class="locked">
+            Yukarıdaki skor fiyat ve hacimden üretilen tahmindir. Yüklediğin AKD ekran görüntüsü
+            kurum yoğunluğunu bu tahminle birlikte gösterir. Kesin virman eşleşmesi için ayrıca
+            canlı takas verisi gerekir.
+            </div>`
+            return
+        }
+
+        if(!j.ok) throw new Error(j.note||j.akd_error||j.takas_error||"Karşılaştırma yapılamadı")
+        const matches=j.matches||[]
+        if(!matches.length){
+            p.innerHTML=estimate+manualAkd+`
+            <div class="card"><h3>AKD + Takas Kontrolü</h3>
+            <div class="green">Bu hissede eşik geçen kurumdan kuruma lot eşleşmesi bulunmadı.</div></div>
+            <div class="warning">Bu sonuç virman olmadığı garantisi vermez.</div>`
+            return
+        }
+
+        const table=matches.map(x=>`
+            <tr>
+                <td>${esc(x.from)}</td>
+                <td>${esc(x.to)}</td>
+                <td>${n(x.lot,0)}</td>
+                <td>%${n(x.difference_percent,2)}</td>
+                <td>${x.score}/100</td>
+                <td class="${x.score>=75?'green':''}">${esc(x.label)}</td>
+            </tr>`).join("")
+
+        p.innerHTML=estimate+manualAkd+`
+        <div class="providerBadge">● AKD + TAKAS EŞLEŞTİRMESİ • ${esc(j.provider||'Lisanslı sağlayıcı')}</div>
+        <div class="dataTableWrap">
+            <table class="dataTable">
+                <thead><tr><th>ÇIKAN KURUM</th><th>GİREN KURUM</th><th>LOT</th><th>FARK</th><th>SKOR</th><th>DURUM</th></tr></thead>
+                <tbody>${table}</tbody>
+            </table>
+        </div>
+        <div class="warning" style="margin-top:10px">Eşleşme olası virmanı gösterir; kesin yatırımcı kimliği veya kesin işlem türü değildir.</div>`
+    }catch(e){
+        if(!silent) p.innerHTML=estimate+manualAkd+'<div class="warning">AKD–takas karşılaştırması yapılamadı: '+esc(e.message)+'</div>'
+    }
 }
 
 function closeDetail(){
-
-    stopDepth();
-
-    document.getElementById("detail").style.display="none";
-    document.getElementById("home").style.display="block";
-
-    window.scrollTo(0,0);
-
+    if(depthTimer){
+        clearInterval(depthTimer)
+        depthTimer=null
+    }
+    document.getElementById("detail").style.display="none"
+    document.getElementById("home").style.display="block"
 }
 
 function detailTab(tab,el){
 
-    stopDepthTimer()
+    if(depthTimer){
+        clearInterval(depthTimer)
+        depthTimer=null
+    }
 
     document.querySelectorAll(".detailTabs button")
         .forEach(b=>b.classList.remove("active"))
@@ -1820,8 +3729,8 @@ function detailTab(tab,el){
         loadDepth(s.symbol);
 
         depthTimer = setInterval(()=>{
-            loadDepth(s.symbol);
-        },8000);
+            if(selected&&selected.symbol===s.symbol) loadDepth(s.symbol,true);
+        },3000);
 
         return
     }
@@ -1830,8 +3739,8 @@ function detailTab(tab,el){
         loadDepth(s.symbol);
 
         depthTimer = setInterval(()=>{
-            loadDepth(s.symbol);
-        },8000);
+            if(selected&&selected.symbol===s.symbol) loadDepth(s.symbol,true);
+        },3000);
 
         return
     }
@@ -1985,74 +3894,15 @@ function detailTab(tab,el){
     }
 
     if(tab==="chart"){
-        const vals=[s.sma20,s.ema50,s.ema20,s.price]
-            .filter(v=>v!==null && v!==undefined)
-            .map(Number)
-
-        const minV=vals.length ? Math.min(...vals) : 0
-        const maxV=vals.length ? Math.max(...vals) : 1
-        const span=(maxV-minV)||1
-
-        const pts=vals.map((v,i)=>{
-            const x=20+(i*(260/Math.max(1,vals.length-1)))
-            const y=170-((v-minV)/span)*120
-            return `${x},${y}`
-        }).join(" ")
-
         p.innerHTML=`
         <div class="card">
-            <h3>${s.symbol} Grafik</h3>
-
-            <svg viewBox="0 0 300 200"
-                 style="width:100%;height:230px;background:#090d14;border-radius:14px">
-
-                <line x1="0" y1="50" x2="300" y2="50"
-                      stroke="#1d2633"/>
-                <line x1="0" y1="100" x2="300" y2="100"
-                      stroke="#1d2633"/>
-                <line x1="0" y1="150" x2="300" y2="150"
-                      stroke="#1d2633"/>
-
-                <polyline
-                    points="${pts}"
-                    fill="none"
-                    stroke="#628cff"
-                    stroke-width="4"
-                    stroke-linecap="round"
-                    stroke-linejoin="round">
-                </polyline>
-            </svg>
-
-            <div class="rows">
-                <div class="row">
-                    <span>SON</span>
-                    <b>₺${n(s.price)}</b>
-                </div>
-
-                <div class="row">
-                    <span>SMA20</span>
-                    <b>₺${n(s.sma20)}</b>
-                </div>
-
-                <div class="row">
-                    <span>EMA20</span>
-                    <b>₺${n(s.ema20)}</b>
-                </div>
-
-                <div class="row">
-                    <span>EMA50</span>
-                    <b>₺${n(s.ema50)}</b>
-                </div>
-            </div>
-        </div>
-
+        <h3>Grafik</h3>
         <div class="warning">
-        Bu şimdilik mevcut fiyat ve ortalamaların teknik grafiğidir.
-        Bir sonraki adımda gerçek geçmiş mum verisini bağlayıp
-        kırmızı-yeşil mum grafik yapacağız.
+        Gün içi mum grafik ve geçmiş fiyat serisi sonraki veri
+        kaynağı bağlantısıyla burada gösterilecek.
+        </div>
         </div>
         `
-        return
     }
 
     if(tab==="technical"){
@@ -2098,36 +3948,27 @@ function detailTab(tab,el){
     }
 
     if(tab==="akd"){
-        p.innerHTML=`
-        <div class="card">
-        <h3>Aracı Kurum Dağılımı — AKD</h3>
-        </div>
-
-        <div class="warning">
-        Burada kurum bazında
-        <b>Alış Lot • Satış Lot • Net Lot • Net TL • En Güçlü Alıcılar • En Güçlü Satıcılar</b>
-        gösterilecek.
-
-        <br><br>
-
-        Gerçek AKD verisi mevcut ücretsiz tarama kaynağında bulunmadığı
-        için şu anda rakam uydurmuyoruz. Lisanslı AKD kaynağı bağlandığında
-        bu sekme otomatik gerçek verilerle dolacak.
-        </div>
-        `
+        loadAkd(s.symbol)
+        depthTimer=setInterval(()=>{
+            if(selected&&selected.symbol===s.symbol) loadAkd(s.symbol,true)
+        },5000)
+        return
     }
 
     if(tab==="takas"){
-        p.innerHTML=`
-        <div class="card">
-        <h3>Takas / Saklama</h3>
-        </div>
+        loadTakas(s.symbol)
+        depthTimer=setInterval(()=>{
+            if(selected&&selected.symbol===s.symbol) loadTakas(s.symbol,true)
+        },60000)
+        return
+    }
 
-        <div class="warning">
-        Kurumların saklama oranları, takas değişimleri ve yoğunlaşma
-        verileri için gerçek takas veri sağlayıcısı bağlanması gerekiyor.
-        </div>
-        `
+    if(tab==="virman"){
+        loadVirman(s.symbol)
+        depthTimer=setInterval(()=>{
+            if(selected&&selected.symbol===s.symbol) loadVirman(s.symbol,true)
+        },60000)
+        return
     }
 
     if(tab==="kap"){
@@ -2167,41 +4008,51 @@ function detailTab(tab,el){
     }
 }
 
-
-// V4_STOCK_CLICK_FIX
-document.addEventListener("click", function(e){
-    const card = e.target.closest(".stock");
-    if(!card) return;
-
-    const symbol = card.dataset.symbol;
-    if(!symbol) return;
-
-    openDetail(symbol);
-});
-
-
-// V4_STOCK_TOUCH
-const v4List = document.getElementById("list");
-
-if(v4List){
-    v4List.addEventListener("click", function(e){
-
-        const card = e.target.closest(".stock");
-
-        if(!card) return;
-
-        const symbol = card.dataset.symbol;
-
-        if(symbol){
-            openDetail(symbol);
-        }
-
-    });
-}
-
 load()
-setInterval(load,60000)
+loadKurlar()
+setInterval(load,10000)
+setInterval(updateLiveStatus,1000)
+setInterval(loadKurlar, 1000)
 
+</script>
+
+
+<div class="mobileBottomNav" id="mobileBottomNav">
+ <button class="active" onclick="bottomGo('all',this)"><b>⌂</b>Ana Sayfa</button>
+ <button onclick="bottomGo('strong',this)"><b>⚡</b>Sinyaller</button>
+ <button onclick="bottomGo('strong',this)"><b>★</b>Güçlü</button>
+ <button onclick="bottomGo('volume',this)"><b>▥</b>Hacim</button>
+ <button onclick="bottomGo('virman',this)"><b>⇄</b>Virman</button>
+</div>
+
+<script>
+function bottomGo(type,el){
+  document.querySelectorAll('#mobileBottomNav button').forEach(x=>x.classList.remove('active'));
+  el.classList.add('active');
+
+  const map={
+    all:'all',
+    strong:'strong',
+    volume:'volume',
+    virman:'virman'
+  };
+
+  const wanted=map[type] || 'all';
+
+  // Mevcut üst filtre butonunu kullan
+  const buttons=[...document.querySelectorAll('button')];
+  const names={
+    all:'Tüm BIST',
+    strong:'Güçlü',
+    volume:'Hacim',
+    virman:'Virman'
+  };
+  const target=buttons.find(b=>b.textContent.trim()===names[wanted]);
+  if(target){
+    target.click();
+    window.scrollTo({top:0,behavior:'smooth'});
+  }
+}
 </script>
 
 </body>
@@ -2249,16 +4100,32 @@ def home():
     return render_template_string(HTML)
 
 
-if __name__ == "__main__":
+@app.route("/api/health")
+def api_health():
+    with CACHE_LOCK:
+        market_count = len(CACHE.get("stocks", []))
+        market_updated = CACHE.get("updated", 0)
+        market_error = CACHE.get("last_error")
 
-    threading.Thread(
-        target=background_loop,
-        daemon=True
-    ).start()
+    return jsonify({
+        "ok": True,
+        "version": APP_VERSION,
+        "market_count": market_count,
+        "market_updated": market_updated,
+        "market_refresh_seconds": MARKET_REFRESH_SECONDS,
+        "market_last_error": market_error,
+        "akd_configured": bool(AKD_API_URL),
+        "takas_configured": bool(TAKAS_API_URL),
+        "telegram_configured": bool(TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID)
+    })
+
+
+if __name__ == "__main__":
+    start_market_worker()
 
     port = int(os.environ.get("PORT", 5000))
 
-    print("BIST VERİ TERMİNALİ V4 AKTİF")
+    print("BIST VERİ TERMİNALİ V6.2 CANLI TARAMA AKTİF")
     print("http://127.0.0.1:%s" % port)
 
     app.run(
