@@ -1,4 +1,4 @@
-from flask import Flask, jsonify, render_template_string
+from flask import Flask, jsonify, make_response, render_template_string
 import requests
 import threading
 import time
@@ -10,7 +10,7 @@ import string
 from datetime import datetime, timedelta, timezone
 
 app = Flask(__name__)
-APP_VERSION = "7.2-PREMIUM-FREE-AKD"
+APP_VERSION = "7.3-TURKIYE-SAATI-HIZLI-KONTROL"
 
 TV_URL = "https://scanner.tradingview.com/turkey/scan"
 
@@ -18,7 +18,9 @@ HEADERS = {
     "User-Agent": "Mozilla/5.0",
     "Content-Type": "application/json",
     "Origin": "https://www.tradingview.com",
-    "Referer": "https://www.tradingview.com/"
+    "Referer": "https://www.tradingview.com/",
+    "Cache-Control": "no-cache, no-store, max-age=0",
+    "Pragma": "no-cache"
 }
 
 # Ücretsiz toplu piyasa kaynağı için en sık yenileme aralığı.
@@ -28,9 +30,21 @@ HEADERS = {
 MARKET_REFRESH_SECONDS = min(
     60, max(3, int(os.getenv("MARKET_REFRESH_SECONDS", "3")))
 )
+MARKET_REQUEST_TIMEOUT_SECONDS = min(
+    20, max(5, int(os.getenv("MARKET_REQUEST_TIMEOUT_SECONDS", "10")))
+)
 MARKET_BACKGROUND_ENABLED = os.getenv(
     "MARKET_BACKGROUND_ENABLED", "1"
 ).strip().lower() not in {"0", "false", "no"}
+
+# Hisse ayrıntısındaki ayrı WebSocket kontrolünün kısa önbelleği. Bu kontrol
+# ücretsiz bir kaynak kullanır; borsa eşanlı veri lisansı yerine geçmez.
+LIVE_QUOTE_CACHE_SECONDS = min(
+    10, max(1, int(os.getenv("LIVE_QUOTE_CACHE_SECONDS", "3")))
+)
+LIVE_QUOTE_WAIT_SECONDS = min(
+    5, max(1, int(os.getenv("LIVE_QUOTE_WAIT_SECONDS", "2")))
+)
 
 CACHE = {
     "stocks": [],
@@ -611,7 +625,8 @@ def fetch_market():
             TV_URL,
             headers=HEADERS,
             json=payload,
-            timeout=30
+            params={"_": int(time.time() * 1000)},
+            timeout=MARKET_REQUEST_TIMEOUT_SECONDS
         )
         r.raise_for_status()
 
@@ -946,7 +961,7 @@ def tv_frame(method, params):
     return f"~m~{len(body)}~m~{body}"
 
 
-def fetch_live_quote(symbol, wait_seconds=4):
+def fetch_live_quote(symbol, wait_seconds=LIVE_QUOTE_WAIT_SECONDS):
     symbol = symbol.upper().strip()
     full_symbol = f"BIST:{symbol}"
 
@@ -1002,7 +1017,8 @@ def fetch_live_quote(symbol, wait_seconds=4):
             "ask_size": None,
             "change_percent": None,
             "volume": None,
-            "updated": int(time.time())
+            "updated": int(time.time()),
+            "source": "TradingView WebSocket"
         }
 
         end = time.time() + wait_seconds
@@ -1060,7 +1076,11 @@ def fetch_live_quote(symbol, wait_seconds=4):
                     if v.get("volume") is not None:
                         result["volume"] = v.get("volume")
 
-                    if result["bid"] is not None and result["ask"] is not None:
+                    # Ücretsiz BIST akışında kademe alanları çoğu zaman boş
+                    # gelir. Son fiyat geldiği anda dönmek, gereksiz 2-4 sn
+                    # beklemeyi önler; boş kademe için son fiyatı saklamayız.
+                    if result["last"] is not None:
+                        result["updated"] = int(time.time())
                         with LIVE_LOCK:
                             LIVE_CACHE[symbol] = result
 
@@ -1071,6 +1091,12 @@ def fetch_live_quote(symbol, wait_seconds=4):
 
         with LIVE_LOCK:
             old = LIVE_CACHE.get(symbol, {})
+
+            # Yeni WebSocket yanıtı son fiyat döndürmediyse eski fiyatın
+            # zaman damgasını koru; ekranda eski veriyi yeniymiş gibi
+            # göstermeyelim.
+            if result.get("last") is None and old.get("updated"):
+                result["updated"] = old["updated"]
 
             for k, v in old.items():
                 if result.get(k) is None:
@@ -1304,7 +1330,10 @@ def api_market():
         "updated": updated,
         "refresh_seconds": MARKET_REFRESH_SECONDS,
         "last_error": last_error,
-        "source": "Toplu BIST canlı tarama",
+        "source": "Ücretsiz toplu BIST taraması",
+        "source_realtime": False,
+        "server_time": int(time.time()),
+        "timezone": "Europe/Istanbul",
         "daily_basket": daily_basket,
         "market_breadth": breadth,
         "telegram_daily_basket_enabled": bool(
@@ -1457,7 +1486,7 @@ MARKET_TICKER_CACHE = {"data": None, "updated": 0}
 MARKET_TICKER_LOCK = threading.Lock()
 
 def fetch_kurlar():
-    if KUR_CACHE["data"] and time.time() - KUR_CACHE["updated"] < 30:
+    if KUR_CACHE["data"] and time.time() - KUR_CACHE["updated"] < 10:
         return KUR_CACHE["data"]
 
     out = {
@@ -1556,6 +1585,7 @@ def fetch_bist100_quote():
             TV_URL,
             headers=HEADERS,
             json=payload,
+            params={"_": int(time.time() * 1000)},
             timeout=12
         )
         response.raise_for_status()
@@ -1576,7 +1606,7 @@ def fetch_market_ticker():
     """Üstteki kayan bant için küçük ve önbellekli piyasa özeti."""
     with MARKET_TICKER_LOCK:
         cached = MARKET_TICKER_CACHE.get("data")
-        if cached and time.time() - MARKET_TICKER_CACHE["updated"] < 10:
+        if cached and time.time() - MARKET_TICKER_CACHE["updated"] < 3:
             return cached
 
         rates = fetch_kurlar()
@@ -1628,7 +1658,12 @@ def fetch_market_ticker():
 
 @app.route("/api/ticker")
 def api_ticker():
-    response = jsonify({"ok": True, "data": fetch_market_ticker()})
+    response = jsonify({
+        "ok": True,
+        "data": fetch_market_ticker(),
+        "server_time": int(time.time()),
+        "timezone": "Europe/Istanbul"
+    })
     response.headers["Cache-Control"] = "no-store, max-age=0"
     return response
 
@@ -2135,6 +2170,16 @@ body{
     animation:priceDown .95s ease-out;
 }
 
+.heroPrice.tickUp{
+    color:#26dfa0;
+    animation:priceUp 1.15s ease-out;
+}
+
+.heroPrice.tickDown{
+    color:#ff7180;
+    animation:priceDown 1.15s ease-out;
+}
+
 @keyframes priceUp{
     0%{background:rgba(38,223,160,.34);transform:translateY(-2px)}
     100%{background:transparent;transform:translateY(0)}
@@ -2221,6 +2266,13 @@ body{
     font-size:31px;
     font-weight:900;
     margin-top:16px;
+}
+
+.detailQuoteMeta{
+    margin-top:7px;
+    color:#8fa4c6;
+    font-size:11px;
+    font-weight:700;
 }
 
 .detailTabs{
@@ -2760,6 +2812,28 @@ html,body{
 }
 
 .tapeChange.flat{color:#718198}
+
+.tapePrice.tapeTickUp{
+    color:#39e6a1;
+    text-shadow:0 0 14px rgba(57,230,161,.75);
+    animation:tapePriceUp 1.05s ease-out;
+}
+
+.tapePrice.tapeTickDown{
+    color:#ff7787;
+    text-shadow:0 0 14px rgba(255,119,135,.65);
+    animation:tapePriceDown 1.05s ease-out;
+}
+
+@keyframes tapePriceUp{
+    0%{transform:translateY(-2px);filter:brightness(1.9)}
+    100%{transform:translateY(0);filter:brightness(1)}
+}
+
+@keyframes tapePriceDown{
+    0%{transform:translateY(2px);filter:brightness(1.9)}
+    100%{transform:translateY(0);filter:brightness(1)}
+}
 
 @keyframes tapeMove{
     from{transform:translateX(0)}
@@ -3615,7 +3689,8 @@ body{padding-bottom:106px!important;}
 /* İlk açılışta hisse listesi yukarıda kalsın; ayrıntılı döviz kartları
    piyasa bandında zaten özetleniyor. */
 #kurBar{display:none!important}
-.title.referenceTitle,.liveStatus{display:none!important}
+.title.referenceTitle{display:none!important}
+.liveStatus{display:flex!important;align-items:center;min-height:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .top{padding:9px 14px 7px}
 .terminalControlBar{grid-template-columns:38px minmax(0,1fr) 38px;gap:7px}
 .terminalRoundButton{width:38px;height:38px;border-radius:12px;font-size:18px}
@@ -3691,21 +3766,21 @@ oninput="renderStocks()">
 <button class="searchToolButton" onclick="openProTool('settings')" aria-label="Ayarlar">⚙</button>
 </div>
 
-<div class="marketTape" aria-label="Canlı piyasa bandı">
+<div class="marketTape" aria-label="Piyasa bandı">
 <div id="tapeTrack" class="tapeTrack">
 <div class="tapeSet">
-<div class="tapeItem"><span class="tapeLabel">BIST 100</span><span class="tapePrice">Yükleniyor</span><span class="tapeChange flat">CANLI</span></div>
-<div class="tapeItem"><span class="tapeLabel">DOLAR/TL</span><span class="tapePrice">Yükleniyor</span><span class="tapeChange flat">CANLI</span></div>
-<div class="tapeItem"><span class="tapeLabel">EURO/TL</span><span class="tapePrice">Yükleniyor</span><span class="tapeChange flat">CANLI</span></div>
-<div class="tapeItem"><span class="tapeLabel">GRAM ALTIN</span><span class="tapePrice">Yükleniyor</span><span class="tapeChange flat">CANLI</span></div>
-<div class="tapeItem"><span class="tapeLabel">ÇEYREK ALTIN</span><span class="tapePrice">Yükleniyor</span><span class="tapeChange flat">CANLI</span></div>
+<div class="tapeItem"><span class="tapeLabel">BIST 100</span><span class="tapePrice">Yükleniyor</span><span class="tapeChange flat">BEKLENİYOR</span></div>
+<div class="tapeItem"><span class="tapeLabel">DOLAR/TL</span><span class="tapePrice">Yükleniyor</span><span class="tapeChange flat">BEKLENİYOR</span></div>
+<div class="tapeItem"><span class="tapeLabel">EURO/TL</span><span class="tapePrice">Yükleniyor</span><span class="tapeChange flat">BEKLENİYOR</span></div>
+<div class="tapeItem"><span class="tapeLabel">GRAM ALTIN</span><span class="tapePrice">Yükleniyor</span><span class="tapeChange flat">BEKLENİYOR</span></div>
+<div class="tapeItem"><span class="tapeLabel">ÇEYREK ALTIN</span><span class="tapePrice">Yükleniyor</span><span class="tapeChange flat">BEKLENİYOR</span></div>
 </div>
 <div class="tapeSet" aria-hidden="true">
-<div class="tapeItem"><span class="tapeLabel">BIST 100</span><span class="tapePrice">Yükleniyor</span><span class="tapeChange flat">CANLI</span></div>
-<div class="tapeItem"><span class="tapeLabel">DOLAR/TL</span><span class="tapePrice">Yükleniyor</span><span class="tapeChange flat">CANLI</span></div>
-<div class="tapeItem"><span class="tapeLabel">EURO/TL</span><span class="tapePrice">Yükleniyor</span><span class="tapeChange flat">CANLI</span></div>
-<div class="tapeItem"><span class="tapeLabel">GRAM ALTIN</span><span class="tapePrice">Yükleniyor</span><span class="tapeChange flat">CANLI</span></div>
-<div class="tapeItem"><span class="tapeLabel">ÇEYREK ALTIN</span><span class="tapePrice">Yükleniyor</span><span class="tapeChange flat">CANLI</span></div>
+<div class="tapeItem"><span class="tapeLabel">BIST 100</span><span class="tapePrice">Yükleniyor</span><span class="tapeChange flat">BEKLENİYOR</span></div>
+<div class="tapeItem"><span class="tapeLabel">DOLAR/TL</span><span class="tapePrice">Yükleniyor</span><span class="tapeChange flat">BEKLENİYOR</span></div>
+<div class="tapeItem"><span class="tapeLabel">EURO/TL</span><span class="tapePrice">Yükleniyor</span><span class="tapeChange flat">BEKLENİYOR</span></div>
+<div class="tapeItem"><span class="tapeLabel">GRAM ALTIN</span><span class="tapePrice">Yükleniyor</span><span class="tapeChange flat">BEKLENİYOR</span></div>
+<div class="tapeItem"><span class="tapeLabel">ÇEYREK ALTIN</span><span class="tapePrice">Yükleniyor</span><span class="tapeChange flat">BEKLENİYOR</span></div>
 </div>
 </div>
 </div>
@@ -3837,6 +3912,7 @@ oninput="renderStocks()">
 <div class="heroName" id="dName"></div>
 <div class="heroPrice" id="dPrice"></div>
 <div id="dChange"></div>
+<div class="detailQuoteMeta" id="dQuoteMeta">Tarama fiyatı • Türkiye saatiyle kontrol ediliyor</div>
 </div>
 
 <div class="detailTabs proTabs">
@@ -3877,7 +3953,9 @@ let marketLoading = false
 let marketDisplayLimit = 150
 let lastPrices = new Map()
 let priceMoves = new Map()
-let marketMeta = {updated:0, refreshSeconds:3, lastError:null}
+let tickerLastPrices = new Map()
+let serverClockOffsetMs = 0
+let marketMeta = {updated:0, refreshSeconds:3, lastError:null, source:"", sourceRealtime:false}
 let dailyBasket = []
 let marketBreadth = {}
 let telegramBasketEnabled = false
@@ -4144,20 +4222,39 @@ async function fetchJsonWithTimeout(url,options={},timeoutMs=8500){
     }
 }
 
+function syncTurkeyClock(serverTime){
+    const epoch=Number(serverTime)
+    if(Number.isFinite(epoch) && epoch>1000000000){
+        serverClockOffsetMs=(epoch*1000)-Date.now()
+    }
+}
+
+function turkeyClockText(epochSeconds=null){
+    const raw=Number(epochSeconds)
+    const date=Number.isFinite(raw) && raw>1000000000
+        ? new Date(raw*1000)
+        : new Date(Date.now()+serverClockOffsetMs)
+    try{
+        return new Intl.DateTimeFormat("tr-TR",{
+            timeZone:"Europe/Istanbul",
+            hour:"2-digit",
+            minute:"2-digit",
+            second:"2-digit",
+            hour12:false
+        }).format(date)
+    }catch(e){
+        return "--:--:--"
+    }
+}
+
 function updateTerminalClock(){
     const clock=document.getElementById("terminalClock")
     const session=document.getElementById("marketSessionText")
-    const now=new Date()
+    const now=new Date(Date.now()+serverClockOffsetMs)
 
     try{
         if(clock){
-            clock.textContent=new Intl.DateTimeFormat("tr-TR",{
-                timeZone:"Europe/Istanbul",
-                hour:"2-digit",
-                minute:"2-digit",
-                second:"2-digit",
-                hour12:false
-            }).format(now)
+            clock.textContent="TR "+turkeyClockText()
         }
 
         if(session){
@@ -4248,6 +4345,20 @@ function renderMarketTape(items){
     const track=document.getElementById("tapeTrack")
     if(!track || !Array.isArray(items) || !items.length) return
 
+    const nextPrices=new Map()
+    const tapeMoves=new Map()
+    items.forEach(item=>{
+        const key=String(item&&item.key||"")
+        const price=Number(item&&item.price)
+        if(!key || !Number.isFinite(price)) return
+        const old=tickerLastPrices.get(key)
+        if(old!==undefined && old!==price){
+            tapeMoves.set(key,price>old ? "tapeTickUp" : "tapeTickDown")
+        }
+        nextPrices.set(key,price)
+    })
+    tickerLastPrices=nextPrices
+
     const content=items.map(item=>{
         const change=Number(item.change)
         const hasChange=Number.isFinite(change)
@@ -4256,10 +4367,11 @@ function renderMarketTape(items){
             : "flat"
         const changeText=hasChange
             ? "%"+(change>0?"+":"")+n(change,2)
-            : "CANLI"
+            : "İZLE"
+        const moveClass=tapeMoves.get(String(item&&item.key||""))||""
         return `<div class="tapeItem">
             <span class="tapeLabel">${esc(item.label)}</span>
-            <span class="tapePrice">${tapePrice(item)}</span>
+            <span class="tapePrice ${moveClass}">${tapePrice(item)}</span>
             <span class="tapeChange ${className}">${changeText}</span>
         </div>`
     }).join("")
@@ -4276,6 +4388,7 @@ async function loadMarketTicker(){
             {cache:"no-store"},
             7500
         )
+        syncTurkeyClock(data.server_time)
         renderMarketTape((data.data||{}).items||[])
     }catch(e){
         console.log("Piyasa bandı hatası",e)
@@ -4484,28 +4597,29 @@ function updateLiveStatus(){
     const text=document.getElementById("liveStatusText")
     if(!status || !text) return
 
-    const now=Math.floor(Date.now()/1000)
+    const now=Math.floor((Date.now()+serverClockOffsetMs)/1000)
     const age=marketMeta.updated ? Math.max(0,now-marketMeta.updated) : null
-    const interval=Math.max(10,Number(marketMeta.refreshSeconds)||10)
+    const interval=Math.max(3,Number(marketMeta.refreshSeconds)||3)
 
     status.classList.toggle("warningLive",Boolean(marketMeta.lastError))
 
     if(age===null){
-        text.textContent="Tüm BIST canlı tarama hazırlanıyor..."
+        text.textContent="BIST taraması hazırlanıyor..."
         return
     }
 
     const prefix=marketMeta.lastError
-        ? "Son başarılı BIST verisi"
-        : "Canlı toplu tarama"
+        ? "Son başarılı BIST taraması"
+        : (marketMeta.sourceRealtime ? "Borsa eşanlı veri" : "Ücretsiz BIST taraması")
     const errorText=marketMeta.lastError
         ? (marketMeta.lastError==="cached"
             ? " • bağlantı kuruluyor"
             : " • sağlayıcı yeniden deneniyor")
         : ""
 
+    const delayed=age>interval*2 ? " • kaynak yanıtı bekleniyor" : ""
     text.textContent=
-        `${prefix} • ${allStocks.length} hisse • ${age} sn önce • ${interval} sn yenileme${errorText}`
+        `${prefix} • ${allStocks.length} hisse • ${age} sn önce çekildi • ${interval} sn kontrol${delayed}${errorText}`
 }
 
 function preparePriceMoves(stocks){
@@ -4572,9 +4686,12 @@ async function load(){
         telegramBasketEnabled=Boolean(j.telegram_daily_basket_enabled)
         marketMeta={
             updated:Number(j.updated)||0,
-            refreshSeconds:Number(j.refresh_seconds)||10,
-            lastError:j.last_error||null
+            refreshSeconds:Number(j.refresh_seconds)||3,
+            lastError:j.last_error||null,
+            source:String(j.source||""),
+            sourceRealtime:Boolean(j.source_realtime)
         }
+        syncTurkeyClock(j.server_time)
         saveLocal("bist_pro_last_market",{
             stocks:allStocks,
             dailyBasket,
@@ -4785,7 +4902,7 @@ function renderStocks(){
                 <span><strong>İşlem</strong> ${money(transactionValue)}</span>
                 <span><strong>Hacim</strong> ${n(s.relative_volume,2)}x</span>
                 <span><strong>RSI</strong> ${n(s.rsi,1)}</span>
-                <span>${marketUpdateTime()}</span>
+                <span>Tarama ${marketUpdateTime()}</span>
             </div>
             ${v.candidate ? `<div class="virmanTag ${vClass}">⚠ ${esc(v.direction||"Kurumsal hareket")} • ${v.score||0}/100</div>` : ""}
             ${setup}
@@ -5377,6 +5494,65 @@ function requestBrowserNotifications(){
     }).catch(()=>showToast("Bildirim izni alınamadı."))
 }
 
+function applySelectedLiveQuote(live,serverTime){
+    if(!selected || !live) return false
+    syncTurkeyClock(serverTime)
+
+    const price=Number(live.last)
+    const change=Number(live.change_percent)
+    const meta=document.getElementById("dQuoteMeta")
+    const checkedAt=turkeyClockText(live.updated||serverTime)
+
+    if(!Number.isFinite(price)){
+        if(meta) meta.textContent="WebSocket kontrolü • TR "+checkedAt+" • fiyat dönmedi"
+        return false
+    }
+
+    const previous=Number(selected.price)
+    selected.price=price
+    if(Number.isFinite(change)) selected.change=change
+
+    const priceElement=document.getElementById("dPrice")
+    if(priceElement){
+        priceElement.textContent="₺"+n(price)
+        if(Number.isFinite(previous) && previous!==price){
+            const move=price>previous ? "tickUp" : "tickDown"
+            priceElement.classList.remove("tickUp","tickDown")
+            void priceElement.offsetWidth
+            priceElement.classList.add(move)
+        }
+    }
+
+    const changeElement=document.getElementById("dChange")
+    if(changeElement && Number.isFinite(Number(selected.change))){
+        changeElement.textContent="%"+n(selected.change)
+        changeElement.className=Number(selected.change)>=0?"green":"red"
+    }
+
+    if(meta){
+        meta.textContent="WebSocket kontrolü • TR "+checkedAt+" • ücretsiz kaynak gecikmeli olabilir"
+    }
+    return true
+}
+
+async function refreshSelectedLiveQuote(symbol){
+    try{
+        const j=await fetchJsonWithTimeout(
+            "/api/live/"+encodeURIComponent(symbol)+"?ts="+Date.now(),
+            {cache:"no-store"},
+            5500
+        )
+        if(selected && selected.symbol===symbol && j.ok){
+            applySelectedLiveQuote(j.live||{},j.server_time)
+        }
+    }catch(e){
+        const meta=document.getElementById("dQuoteMeta")
+        if(selected && selected.symbol===symbol && meta){
+            meta.textContent="WebSocket kontrolü şu an alınamadı • tarama fiyatı gösteriliyor"
+        }
+    }
+}
+
 async function openDetail(symbol){
     try{
         const r=await fetch("/api/stock/"+encodeURIComponent(symbol),{cache:"no-store"})
@@ -5394,12 +5570,15 @@ async function openDetail(symbol){
         const ch=document.getElementById("dChange")
         ch.textContent="%"+n(selected.change)
         ch.className=(selected.change||0)>=0?"green":"red"
+        const quoteMeta=document.getElementById("dQuoteMeta")
+        if(quoteMeta) quoteMeta.textContent="Tarama fiyatı • TR "+turkeyClockText()+" • hızlı kontrol yapılıyor"
 
         const favoriteButton=document.getElementById("detailFavoriteButton")
         if(favoriteButton) favoriteButton.textContent=isFavorite(selected.symbol)?"★":"☆"
 
         detailTab("summary",document.querySelector(".detailTabs button"))
         window.scrollTo(0,0)
+        refreshSelectedLiveQuote(selected.symbol)
     }catch(error){
         showToast("Hisse ayrıntısı açılamadı. Bağlantıyı kontrol edip tekrar dene.")
     }
@@ -5422,12 +5601,13 @@ async function loadDepth(symbol,silent=false){
 
     try{
 
-        const r=await fetch("/api/live/"+symbol)
+        const r=await fetch("/api/live/"+encodeURIComponent(symbol)+"?ts="+Date.now(),{cache:"no-store"})
         const j=await r.json()
 
         if(!j.ok) throw new Error("Veri alınamadı")
 
         const x=j.live
+        applySelectedLiveQuote(x,j.server_time)
 
         const bidLot = Number(x.bid_size || 0)
         const askLot = Number(x.ask_size || 0)
@@ -5580,7 +5760,7 @@ async function loadLive(symbol){
     `
 
     try{
-        const r=await fetch("/api/live/"+symbol)
+        const r=await fetch("/api/live/"+encodeURIComponent(symbol)+"?ts="+Date.now(),{cache:"no-store"})
         const j=await r.json()
 
         if(!j.ok){
@@ -5588,6 +5768,7 @@ async function loadLive(symbol){
         }
 
         const x=j.live
+        applySelectedLiveQuote(x,j.server_time)
 
         p.innerHTML=`
         <div class="card">
@@ -6689,7 +6870,7 @@ def api_live(symbol):
     with LIVE_LOCK:
         cached = LIVE_CACHE.get(symbol)
 
-    if cached and time.time() - cached.get("updated", 0) < 8:
+    if cached and time.time() - cached.get("updated", 0) < LIVE_QUOTE_CACHE_SECONDS:
         data = cached
     else:
         data = fetch_live_quote(symbol)
@@ -6709,17 +6890,26 @@ def api_live(symbol):
     data["spread"] = spread
     data["spread_pct"] = spread_pct
 
-    return jsonify({
+    response = jsonify({
         "ok": True,
         "live": data,
-        "note": "TradingView WebSocket verisi. BIST verisi gecikmeli olabilir."
+        "server_time": int(time.time()),
+        "timezone": "Europe/Istanbul",
+        "note": (
+            "WebSocket hızlı fiyat kontrolüdür. Ücretsiz BIST verisi "
+            "gecikmeli olabilir; borsa eşanlı veri lisansı değildir."
+        )
     })
+    response.headers["Cache-Control"] = "no-store, max-age=0"
+    return response
 
 
 
 @app.route("/")
 def home():
-    return render_template_string(HTML)
+    response = make_response(render_template_string(HTML))
+    response.headers["Cache-Control"] = "no-store, max-age=0"
+    return response
 
 
 @app.route("/api/health")
