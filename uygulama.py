@@ -10,7 +10,7 @@ import string
 from datetime import datetime, timedelta, timezone
 
 app = Flask(__name__)
-APP_VERSION = "7.0-PRO-SEPET"
+APP_VERSION = "7.1-MOBILE-RADAR"
 
 TV_URL = "https://scanner.tradingview.com/turkey/scan"
 
@@ -1881,7 +1881,7 @@ HTML = r'''
 <meta name="viewport"
 content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
 
-<title>BIST Veri Terminali PRO+</title>
+<title>BIST PRO Radar</title>
 
 <script src="https://telegram.org/js/telegram-web-app.js"></script>
 <!-- AKD ekran görüntüsünü telefonda, sunucuya göndermeden okumak için. -->
@@ -3202,43 +3202,410 @@ html,body{
 </style>
 
 <style>
+/* ===== V7.1 MOBILE RADAR: REFERANS VİDEO DÜZENİ ===== */
+body{
+    background:#05080e;
+}
+
+.app{
+    max-width:680px;
+    padding-bottom:108px;
+}
+
+#home{
+    min-height:100vh;
+    background:
+        radial-gradient(circle at 92% 12%,rgba(53,92,201,.18),transparent 25%),
+        radial-gradient(circle at 6% 38%,rgba(29,168,174,.08),transparent 24%),
+        #05080e;
+}
+
+.top{
+    position:relative;
+    top:auto;
+    overflow:hidden;
+    padding:12px 14px 9px;
+    border:0;
+    background:
+        radial-gradient(ellipse at 89% 30%,rgba(72,104,243,.54),transparent 37%),
+        radial-gradient(ellipse at 10% 88%,rgba(21,183,183,.22),transparent 26%),
+        linear-gradient(135deg,#080d21 0%,#111d55 50%,#0b1232 100%);
+}
+
+.top:before{
+    content:"";
+    position:absolute;
+    inset:0;
+    opacity:.32;
+    pointer-events:none;
+    background:
+        linear-gradient(104deg,transparent 31%,rgba(139,173,255,.25) 38%,transparent 48%),
+        linear-gradient(166deg,transparent 42%,rgba(120,245,232,.16) 54%,transparent 65%);
+}
+
+.terminalControlBar,.referenceTitle,.liveStatus,.searchRow,.marketTape{
+    position:relative;
+    z-index:1;
+}
+
+.terminalControlBar{
+    display:grid;
+    grid-template-columns:43px minmax(0,1fr) 43px;
+    align-items:center;
+    gap:9px;
+}
+
+.terminalRoundButton{
+    width:43px;
+    height:43px;
+    border:1px solid rgba(196,219,255,.17);
+    border-radius:14px;
+    background:rgba(5,10,22,.50);
+    color:#e8f0ff;
+    font-size:21px;
+    font-weight:900;
+}
+
+.marketPill{
+    display:flex;
+    align-items:center;
+    justify-content:center;
+    gap:7px;
+    min-width:0;
+    height:39px;
+    padding:0 10px;
+    border:1px solid rgba(132,154,222,.30);
+    border-radius:999px;
+    background:rgba(2,7,14,.72);
+    color:#e8effe;
+    font-size:12px;
+    font-weight:900;
+    white-space:nowrap;
+}
+
+.marketPill .liveDot{
+    width:7px;
+    height:7px;
+    flex:0 0 7px;
+}
+
+.marketOpenText{color:#39e29d}
+.marketClosedText{color:#f5c763}
+.marketPillSep{color:#6f7d99}
+
+.title.referenceTitle{
+    display:flex;
+    align-items:center;
+    gap:7px;
+    margin-top:11px;
+    color:#f4f7ff;
+    font-size:19px;
+    letter-spacing:-.3px;
+}
+
+.title.referenceTitle span{
+    padding:4px 7px;
+    border:1px solid rgba(92,218,255,.35);
+    border-radius:7px;
+    background:rgba(12,96,161,.33);
+    color:#86dcff!important;
+    font-size:9px!important;
+    letter-spacing:.5px;
+}
+
+.sub{display:none}
+
+.liveStatus{
+    margin-top:5px;
+    color:#b2c2db;
+    font-size:10px;
+}
+
+.liveStatus>.liveDot{display:none}
+
+.searchRow{
+    display:grid;
+    grid-template-columns:minmax(0,1fr) 48px;
+    gap:9px;
+    margin-top:12px;
+}
+
+.search{
+    min-width:0;
+    margin:0;
+    padding:13px 14px;
+    border:1px solid rgba(166,193,255,.16);
+    border-radius:15px;
+    background:rgba(5,10,19,.78);
+    box-shadow:inset 0 1px 0 rgba(255,255,255,.035);
+    color:#f4f7fb;
+    font-size:14px;
+}
+
+.searchToolButton{
+    border:1px solid rgba(169,195,255,.23);
+    border-radius:15px;
+    background:rgba(7,13,27,.68);
+    color:#d9e4f7;
+    font-size:21px;
+}
+
+.marketTape{
+    margin:11px -14px -9px;
+    border:0;
+    border-radius:0;
+    background:rgba(1,5,10,.69);
+    box-shadow:inset 0 1px 0 rgba(255,255,255,.04);
+}
+
+.tapeTrack,.tapeTrack.paused{
+    min-width:max-content;
+    animation:tapeMove 23s linear infinite!important;
+    animation-play-state:running!important;
+    will-change:transform;
+}
+
+.tapeItem{
+    min-width:164px;
+    padding:8px 12px;
+    border-right:1px solid rgba(151,176,229,.12);
+}
+
+.tapeLabel{color:#9eafca;font-size:9px}
+.tapePrice{color:#eff5ff;font-size:12px}
+.tapeChange{font-size:10px}
+
+.terminalDashboard{
+    padding:11px 14px 2px;
+}
+
+.dashboardHero{
+    min-height:0;
+    padding:13px 14px;
+    border:1px solid rgba(53,133,175,.42);
+    border-radius:17px;
+    background:
+        radial-gradient(circle at 100% 0,rgba(51,210,195,.18),transparent 34%),
+        linear-gradient(125deg,#0a2632,#0b1420 64%);
+}
+
+.dashboardHero:after{display:none}
+.dashEyebrow{font-size:9px;color:#5fe6d2}
+.dashTitle{max-width:100%;font-size:16px;line-height:1.2}
+.dashText{max-width:100%;font-size:10px;line-height:1.45}
+.dashButton{margin-top:10px;padding:8px 10px;border-color:#2bb9af;border-radius:10px;background:#087c78;font-size:10px}
+
+.breadthGrid{gap:6px;margin-top:7px}
+.breadthCard{padding:8px 5px;border-color:#162c39;border-radius:10px;background:#09121a}
+.breadthCard span{font-size:8px}.breadthCard b{margin-top:3px;font-size:13px}
+
+.stats{display:none}
+
+.tabs{
+    gap:7px;
+    padding:10px 14px 4px;
+    scrollbar-width:none;
+}
+
+.tabs::-webkit-scrollbar,.proQuickTools::-webkit-scrollbar{display:none}
+
+.tabs button{
+    border-color:#203447;
+    border-radius:999px;
+    padding:8px 11px;
+    background:#0c1721;
+    color:#a7b8cc;
+    font-size:10px;
+    font-weight:800;
+}
+
+.tabs button.active{
+    border-color:#3bd3c8;
+    background:#0a7776;
+    color:#f3ffff;
+}
+
+.proQuickTools{
+    display:flex;
+    gap:7px;
+    overflow-x:auto;
+    padding:6px 14px 8px;
+    scrollbar-width:none;
+}
+
+.quickTool{
+    display:flex;
+    flex:0 0 auto;
+    align-items:center;
+    gap:5px;
+    min-height:35px;
+    padding:8px 10px;
+    border-color:#1d3242;
+    border-radius:11px;
+    background:#0d1721;
+    color:#b1c2d7;
+    font-size:10px;
+}
+
+.quickTool b,.quickTool.featured b,.quickTool.orange b,.quickTool.greenTool b,.quickTool.pink b{
+    display:inline;
+    margin:0;
+    color:#62e2d5;
+    font-size:13px;
+    line-height:1;
+}
+
+.quickTool.featured{border-color:#236d78;background:#0b3340;color:#dffcf8}
+.quickTool.orange b{color:#ffcb72}.quickTool.pink b{color:#ff90aa}
+
+.commandGrid{display:grid;grid-template-columns:repeat(2,1fr);gap:9px;margin-top:12px}
+.commandCard{
+    min-height:112px;
+    padding:13px;
+    border:1px solid #1d3545;
+    border-radius:16px;
+    background:linear-gradient(145deg,#0d1a25,#09121b);
+    color:#eef6ff;
+    text-align:left;
+}
+.commandCard b{display:block;margin-top:8px;font-size:13px}
+.commandCard span{display:block;margin-top:5px;color:#92a7bd;font-size:10px;line-height:1.35}
+.commandIcon{display:flex;align-items:center;justify-content:center;width:32px;height:32px;border-radius:10px;background:#123c45;color:#66e4d5;font-size:17px;font-weight:900}
+.commandCard.warningCard .commandIcon{background:#392b13;color:#ffce77}
+.commandCard.pinkCard .commandIcon{background:#381a2c;color:#ff99b6}
+
+.watchlistHeader{
+    display:flex;
+    align-items:center;
+    justify-content:space-between;
+    gap:8px;
+    margin:0 14px;
+    padding:11px 2px 8px;
+    border-top:1px solid rgba(121,151,182,.10);
+}
+
+.watchlistTitleWrap{display:flex;align-items:center;gap:7px;min-width:0}
+.watchlistTitle{color:#f0f5fd;font-size:16px;font-weight:900;white-space:nowrap}
+.watchlistCount{min-width:23px;padding:3px 7px;border-radius:999px;background:#1a2737;color:#9fb5cd;font-size:10px;font-weight:900;text-align:center}
+.watchlistActions{display:flex;align-items:center;gap:6px}
+.watchlistAction{border:0;border-radius:10px;padding:7px 9px;background:transparent;color:#8295ab;font-size:10px;font-weight:800}
+.watchlistAction.alert{border:1px solid #1e7473;background:#0b3236;color:#65eadb}
+
+.list{padding:0 14px 12px}
+
+.stock{
+    margin:0;
+    padding:12px 1px;
+    border:0;
+    border-bottom:1px solid rgba(124,148,177,.13);
+    border-radius:0;
+    background:transparent;
+    box-shadow:none;
+}
+
+.stock.virmanCandidate{border-color:#755a1c;box-shadow:none}
+
+.stockTop{
+    display:grid;
+    grid-template-columns:46px minmax(0,1fr) max-content;
+    align-items:center;
+    gap:10px;
+}
+
+.stockAvatar{
+    display:flex;
+    align-items:center;
+    justify-content:center;
+    width:45px;
+    height:45px;
+    border:1px solid rgba(223,240,255,.18);
+    border-radius:14px;
+    background:linear-gradient(145deg,hsl(var(--avatar-hue),55%,42%),hsl(var(--avatar-hue),48%,22%));
+    box-shadow:inset 0 1px 0 rgba(255,255,255,.15);
+    color:#effaff;
+    font-size:11px;
+    font-weight:900;
+    letter-spacing:-.4px;
+}
+
+.stockIdentity{min-width:0}
+.stockTitleLine{gap:5px}
+.symbol{font-size:16px;letter-spacing:.1px}
+.desc{overflow:hidden;margin-top:2px;color:#78899c;font-size:9px;text-overflow:ellipsis;white-space:nowrap}
+.favoriteButton{width:24px;height:24px;border-radius:8px;font-size:13px}
+
+.stockQuote{display:flex;flex-direction:column;align-items:flex-end;gap:4px;min-width:80px}
+.price{font-size:16px;line-height:1}
+.changeBadge{padding:4px 7px;border-radius:7px;background:#182c2a;font-size:10px;font-weight:900;line-height:1}
+.changeBadge.red{background:#2e1620}.changeBadge.green{background:#12352d}
+
+.stockMetaLine{
+    display:flex;
+    gap:7px;
+    margin:7px 0 0 56px;
+    overflow:hidden;
+    color:#7e90a6;
+    font-size:9px;
+    white-space:nowrap;
+}
+
+.stockMetaLine span{overflow:hidden;text-overflow:ellipsis}
+.stockMetaLine strong{color:#a7b7ca;font-weight:800}
+.stockSetup{margin:7px 0 0 56px;padding:4px 7px;border-radius:7px;border-color:#1e5665;background:#0a2933;color:#5cdccf;font-size:9px}
+.smallgrid{display:none}
+.stock .virmanTag{margin:8px 0 0 56px;padding:6px 8px;border-radius:8px;font-size:9px}
+
+.showMore{width:100%;margin:14px 0 2px;border-radius:12px;background:#0a2c3a;border-color:#207987;color:#67e6db;font-size:11px}
+
+.bottom{display:none!important}
+.toast{bottom:97px}
+
+@media (prefers-reduced-motion:reduce){
+    .tapeTrack,.tapeTrack.paused{animation:tapeMove 48s linear infinite!important}
+}
+
 .mobileBottomNav{
     position:fixed;
-    left:0;
-    right:0;
-    bottom:0;
-    z-index:9999;
-    height:64px;
-    padding:6px 8px max(6px,env(safe-area-inset-bottom));
-    background:#0b111a;
-    border-top:1px solid #202c3a;
+    left:50%;
+    right:auto;
+    bottom:max(10px,env(safe-area-inset-bottom));
+    z-index:10000;
+    width:calc(100% - 22px);
+    max-width:560px;
+    height:70px;
+    padding:6px;
+    transform:translateX(-50%);
+    border:1px solid rgba(142,169,204,.22);
+    border-radius:23px;
+    background:rgba(11,18,29,.94);
+    box-shadow:0 12px 32px rgba(0,0,0,.43),inset 0 1px 0 rgba(255,255,255,.05);
+    backdrop-filter:blur(18px);
     display:grid;
-    grid-template-columns:repeat(5,1fr);
-    gap:5px;
+    grid-template-columns:repeat(4,1fr);
+    gap:4px;
 }
 .mobileBottomNav button{
     border:0;
     background:transparent;
-    color:#8591a3;
-    font-size:12px;
-    font-weight:600;
-    border-radius:10px;
-    padding:5px 2px;
+    color:#8797aa;
+    font-size:10px;
+    font-weight:800;
+    border-radius:17px;
+    padding:5px 2px 4px;
 }
 .mobileBottomNav button b{
     display:block;
-    color:#dce5f2;
-    font-size:18px;
-    line-height:20px;
-    margin-bottom:2px;
+    color:#d7e1ee;
+    font-size:19px;
+    line-height:22px;
+    margin-bottom:3px;
 }
 .mobileBottomNav button.active{
-    color:#2684ff;
-    background:#111c2b;
+    color:#ecfffd;
+    background:linear-gradient(145deg,rgba(44,194,186,.30),rgba(21,72,91,.50));
 }
-.mobileBottomNav button.active b{color:#2684ff}
-body{padding-bottom:76px!important;}
-.bottom{bottom:64px!important;}
+.mobileBottomNav button.active b{color:#68f1df}
+body{padding-bottom:106px!important;}
 </style>
 
 </head>
@@ -3250,26 +3617,49 @@ body{padding-bottom:76px!important;}
 <div id="home">
 
 <div class="top">
-<div class="title">BIST Veri Terminali <span style="font-size:11px;color:#64a5ff">PRO+</span></div>
-<div class="sub">Piyasa • Teknik • Sinyal • Canlı Tarama • Takas • Virman • AI</div>
+<div class="terminalControlBar">
+<button class="terminalRoundButton" onclick="refreshHome()" aria-label="Piyasayı yenile">↻</button>
+<div class="marketPill">
+<span class="liveDot"></span>
+<span id="marketSessionText" class="marketOpenText">Piyasa hazırlanıyor</span>
+<span class="marketPillSep">•</span>
+<span id="terminalClock">--:--:--</span>
+</div>
+<button class="terminalRoundButton" onclick="openProTool('tools')" aria-label="Araçlar">☷</button>
+</div>
+<div class="title referenceTitle">BIST PRO RADAR <span>CANLI</span></div>
 <div id="liveStatus" class="liveStatus">
 <span class="liveDot"></span>
 <span id="liveStatusText">Tüm BIST canlı taramaya hazırlanıyor...</span>
 </div>
 
-<div class="marketTape" aria-label="Canlı piyasa bandı">
-<div id="tapeTrack" class="tapeTrack paused">
-<div class="tapeSet">
-<div class="tapeItem"><span class="tapeLabel">CANLI PİYASA</span><span class="tapePrice">Yükleniyor...</span></div>
-</div>
-</div>
-</div>
-
+<div class="searchRow">
 <input
 id="search"
 class="search"
 placeholder="🔎 Hisse ara: ASELS, THYAO, TUPRS..."
 oninput="renderStocks()">
+<button class="searchToolButton" onclick="openProTool('tools')" aria-label="Araçlar">⚙</button>
+</div>
+
+<div class="marketTape" aria-label="Canlı piyasa bandı">
+<div id="tapeTrack" class="tapeTrack">
+<div class="tapeSet">
+<div class="tapeItem"><span class="tapeLabel">BIST 100</span><span class="tapePrice">Yükleniyor</span><span class="tapeChange flat">CANLI</span></div>
+<div class="tapeItem"><span class="tapeLabel">DOLAR/TL</span><span class="tapePrice">Yükleniyor</span><span class="tapeChange flat">CANLI</span></div>
+<div class="tapeItem"><span class="tapeLabel">EURO/TL</span><span class="tapePrice">Yükleniyor</span><span class="tapeChange flat">CANLI</span></div>
+<div class="tapeItem"><span class="tapeLabel">GRAM ALTIN</span><span class="tapePrice">Yükleniyor</span><span class="tapeChange flat">CANLI</span></div>
+<div class="tapeItem"><span class="tapeLabel">ÇEYREK ALTIN</span><span class="tapePrice">Yükleniyor</span><span class="tapeChange flat">CANLI</span></div>
+</div>
+<div class="tapeSet" aria-hidden="true">
+<div class="tapeItem"><span class="tapeLabel">BIST 100</span><span class="tapePrice">Yükleniyor</span><span class="tapeChange flat">CANLI</span></div>
+<div class="tapeItem"><span class="tapeLabel">DOLAR/TL</span><span class="tapePrice">Yükleniyor</span><span class="tapeChange flat">CANLI</span></div>
+<div class="tapeItem"><span class="tapeLabel">EURO/TL</span><span class="tapePrice">Yükleniyor</span><span class="tapeChange flat">CANLI</span></div>
+<div class="tapeItem"><span class="tapeLabel">GRAM ALTIN</span><span class="tapePrice">Yükleniyor</span><span class="tapeChange flat">CANLI</span></div>
+<div class="tapeItem"><span class="tapeLabel">ÇEYREK ALTIN</span><span class="tapePrice">Yükleniyor</span><span class="tapeChange flat">CANLI</span></div>
+</div>
+</div>
+</div>
 </div>
 
 <div id="terminalDashboard" class="terminalDashboard">
@@ -3362,6 +3752,18 @@ oninput="renderStocks()">
 <button class="quickTool orange" onclick="openProTool('risk')"><b>◫</b>Risk Hesabı</button>
 </div>
 
+<div class="watchlistHeader">
+<div class="watchlistTitleWrap">
+<button class="watchlistAction" onclick="applyQuickFilter('favorites')">Favorilerim⌄</button>
+<span id="watchlistTitle" class="watchlistTitle">Piyasa Radarı</span>
+<span id="watchlistCount" class="watchlistCount">0</span>
+</div>
+<div class="watchlistActions">
+<button class="watchlistAction" onclick="openProTool('tools')">Düzenle</button>
+<button class="watchlistAction alert" onclick="openProTool('alerts')">♧ Alarmlar</button>
+</div>
+</div>
+
 <div id="list" class="list">
 <div class="loading">BIST verileri yükleniyor...</div>
 </div>
@@ -3405,10 +3807,6 @@ oninput="renderStocks()">
 <div id="toolPanel" class="toolPanel"></div>
 </div>
 
-</div>
-
-<div class="bottom">
-Veriler analiz amaçlıdır • Yatırım tavsiyesi değildir
 </div>
 
 <div id="toast" class="toast" role="status"></div>
@@ -3536,6 +3934,58 @@ async function fetchJsonWithTimeout(url,options={},timeoutMs=8500){
     }finally{
         if(timeout) clearTimeout(timeout)
     }
+}
+
+function updateTerminalClock(){
+    const clock=document.getElementById("terminalClock")
+    const session=document.getElementById("marketSessionText")
+    const now=new Date()
+
+    try{
+        if(clock){
+            clock.textContent=new Intl.DateTimeFormat("tr-TR",{
+                timeZone:"Europe/Istanbul",
+                hour:"2-digit",
+                minute:"2-digit",
+                second:"2-digit",
+                hour12:false
+            }).format(now)
+        }
+
+        if(session){
+            const parts=new Intl.DateTimeFormat("en-US",{
+                timeZone:"Europe/Istanbul",
+                weekday:"short",
+                hour:"2-digit",
+                minute:"2-digit",
+                hour12:false
+            }).formatToParts(now)
+            const get=type=>parts.find(item=>item.type===type)?.value||""
+            const weekday=get("weekday")
+            const hour=Number(get("hour"))
+            const minute=Number(get("minute"))
+            const totalMinute=hour*60+minute
+            const weekdayOpen=["Mon","Tue","Wed","Thu","Fri"].includes(weekday)
+            const marketOpen=weekdayOpen && totalMinute>=580 && totalMinute<1090
+            const online=allStocks.length>0 && !marketMeta.lastError
+
+            session.textContent=marketOpen
+                ? "Piyasa Açık"
+                : (online ? "Piyasa Kapalı" : "Bağlanıyor")
+            session.classList.toggle("marketOpenText",marketOpen)
+            session.classList.toggle("marketClosedText",!marketOpen)
+        }
+    }catch(e){
+        if(clock) clock.textContent="Canlı"
+    }
+}
+
+function refreshHome(){
+    showToast("Piyasa verisi yenileniyor...")
+    load()
+    loadMarketTicker()
+    loadKurlar()
+    updateTerminalClock()
 }
 
 function tryPortraitLock(){
@@ -3946,6 +4396,48 @@ function setFilter(f,el){
     renderStocks()
 }
 
+function stockHue(symbol){
+    let hash=0
+    for(const letter of String(symbol||"")){
+        hash=((hash<<5)-hash)+letter.charCodeAt(0)
+        hash|=0
+    }
+    return 170+Math.abs(hash%150)
+}
+
+function marketUpdateTime(){
+    const updated=Number(marketMeta.updated)
+    if(!updated) return "--:--"
+    try{
+        return new Date(updated*1000).toLocaleTimeString("tr-TR",{
+            timeZone:"Europe/Istanbul",
+            hour:"2-digit",
+            minute:"2-digit"
+        })
+    }catch(e){
+        return "--:--"
+    }
+}
+
+function updateListHeader(total){
+    const titles={
+        all:"Piyasa Radarı",
+        strong:"Güçlü Sinyaller",
+        up:"Yükselenler",
+        down:"Düşenler",
+        volume:"Hacim Radarı",
+        breakout:"Kırılım Radarı",
+        momentum:"Momentum",
+        pullback:"Toparlanma",
+        favorites:"Favorilerim",
+        virman:"Kurumsal Radar"
+    }
+    const title=document.getElementById("watchlistTitle")
+    const count=document.getElementById("watchlistCount")
+    if(title) title.textContent=titles[filter]||"Piyasa Radarı"
+    if(count) count.textContent=Number(total||0).toLocaleString("tr-TR")
+}
+
 function renderStocks(){
     let q=document.getElementById("search").value
         .trim()
@@ -3996,6 +4488,7 @@ function renderStocks(){
             .sort((a,b)=>(b.institutional.score||0)-(a.institutional.score||0))
 
     const totalMatched=arr.length
+    updateListHeader(totalMatched)
 
     // Telefonu yüzlerce kartla ilk açılışta yormadan tüm hisseleri bellekte
     // tutuyoruz. Arama tüm BIST listesini tarar; aşağıdaki düğmeyle listenin
@@ -4015,55 +4508,45 @@ function renderStocks(){
     }
 
     list.innerHTML=arr.map(s=>{
-
-        let cls=(s.change||0)>=0 ? "green":"red"
+        const change=Number(s.change)
+        const cls=Number.isFinite(change) && change>=0 ? "green":"red"
         const v=s.institutional||{}
         const technical=s.technical||{}
         const vClass=(v.direction||"").includes("SATIŞ") ? "sell":"buy"
         const candidateClass=v.candidate ? " virmanCandidate":""
         const favoriteClass=isFavorite(s.symbol)?" active":""
-        const normalMetrics=`
-            <div class="small"><span>RSI</span><b>${n(s.rsi,1)}</b></div>
-            <div class="small"><span>Rel. Hacim</span><b>${n(s.relative_volume,2)}x</b></div>
-            <div class="small"><span>Skor</span><b>${s.score}/150</b></div>
-            <div class="small"><span>Sinyal</span><b>${s.signal}</b></div>
-        `
-        const virmanMetrics=`
-            <div class="small"><span>Kurumsal Skor</span><b>${v.score||0}/100</b></div>
-            <div class="small"><span>Rel. Hacim</span><b>${n(s.relative_volume,2)}x</b></div>
-            <div class="small"><span>İşlem</span><b>${money(v.transaction_value)}</b></div>
-            <div class="small"><span>Normal Üstü</span><b>${money(v.abnormal_value)}</b></div>
-        `
+        const symbol=String(s.symbol||"").toUpperCase()
+        const avatar=symbol.slice(0,2)||"BI"
+        const transactionValue=Number(s.price||0)*Number(s.volume||0)
+        const setup=technical.label&&technical.label!=="NÖTR İZLE"
+            ? `<div class="stockSetup">${esc(technical.label)} • ${technical.score||0}/100</div>`
+            : ""
 
         return `
         <div class="stock${candidateClass}" onclick='openDetail(${JSON.stringify(s.symbol)})'>
-
-        <div class="stockTop">
-
-        <div>
-        <div class="stockTitleLine">
-        <div class="symbol">${s.symbol}</div>
-        <button class="favoriteButton${favoriteClass}" aria-label="Favoriye ekle" onclick='event.stopPropagation();toggleFavorite(${JSON.stringify(s.symbol)})'>${isFavorite(s.symbol)?"★":"☆"}</button>
-        </div>
-        <div class="desc">${s.description||""}</div>
-        </div>
-
-        <div>
-        <div class="price ${priceMoves.get(s.symbol)||""}">₺${n(s.price)}</div>
-        <div class="${cls}">%${n(s.change)}</div>
-        </div>
-
-        </div>
-
-        ${v.candidate ? `<div class="virmanTag ${vClass}">⚠ ${v.direction} • ${v.score}/100</div>` : ""}
-        ${technical.label&&technical.label!=="NÖTR İZLE" ? `<div class="stockSetup">${technical.label} • ${technical.score||0}/100</div>` : ""}
-
-        <div class="smallgrid">
-        ${filter==="virman" ? virmanMetrics : normalMetrics}
-        </div>
-
-        </div>
-        `
+            <div class="stockTop">
+                <div class="stockAvatar" style="--avatar-hue:${stockHue(symbol)}">${esc(avatar)}</div>
+                <div class="stockIdentity">
+                    <div class="stockTitleLine">
+                        <div class="symbol">${esc(symbol)}</div>
+                        <button class="favoriteButton${favoriteClass}" aria-label="Favoriye ekle" onclick='event.stopPropagation();toggleFavorite(${JSON.stringify(s.symbol)})'>${isFavorite(s.symbol)?"★":"☆"}</button>
+                    </div>
+                    <div class="desc">${esc(s.description||"")}</div>
+                </div>
+                <div class="stockQuote">
+                    <div class="price ${priceMoves.get(s.symbol)||""}">₺${n(s.price)}</div>
+                    <div class="changeBadge ${cls}">%${n(s.change)}</div>
+                </div>
+            </div>
+            <div class="stockMetaLine">
+                <span><strong>İşlem</strong> ${money(transactionValue)}</span>
+                <span><strong>Hacim</strong> ${n(s.relative_volume,2)}x</span>
+                <span><strong>RSI</strong> ${n(s.rsi,1)}</span>
+                <span>${marketUpdateTime()}</span>
+            </div>
+            ${v.candidate ? `<div class="virmanTag ${vClass}">⚠ ${esc(v.direction||"Kurumsal hareket")} • ${v.score||0}/100</div>` : ""}
+            ${setup}
+        </div>`
     }).join("")
 
     if(!q && filter==="all" && arr.length<totalMatched){
@@ -4079,7 +4562,8 @@ function openProTool(tool){
         basket:"Günlük Teknik Sepet",
         portfolio:"Portföy & Maliyet",
         alerts:"Akıllı Alarmlar",
-        risk:"Risk Hesaplayıcı"
+        risk:"Risk Hesaplayıcı",
+        tools:"Komuta Merkezi"
     }
     document.getElementById("toolHeadTitle").textContent=titles[tool]||"Pro Araçlar"
     const sheet=document.getElementById("toolSheet")
@@ -4105,7 +4589,40 @@ function renderProTool(){
     else if(proCurrentTool==="portfolio") panel.innerHTML=renderPortfolioTool()
     else if(proCurrentTool==="alerts") panel.innerHTML=renderAlertsTool()
     else if(proCurrentTool==="risk") panel.innerHTML=renderRiskTool()
+    else if(proCurrentTool==="tools") panel.innerHTML=renderToolsTool()
     else panel.innerHTML='<div class="warning">Araç bulunamadı.</div>'
+}
+
+function renderToolsTool(){
+    const cards=[
+        ["◈","Günlük Sepet","Bugünün 5 teknik takip adayı","openProTool('basket')",""],
+        ["▣","Portföy","Maliyet ve anlık kâr/zarar","openProTool('portfolio')",""],
+        ["♧","Alarmlar","Fiyat, yüzde ve hacim uyarıları","openProTool('alerts')",""],
+        ["◫","Risk Hesabı","Lot ve risk/ödül hesaplayıcı","openProTool('risk')","warningCard"],
+        ["↗","Kırılım Radar","Hacimli teknik kırılım adayları","closeProTool();applyQuickFilter('breakout')",""],
+        ["⚡","Momentum","Güçlü teknik momentum filtresi","closeProTool();applyQuickFilter('momentum')",""],
+        ["⌁","Toparlanma","EMA20 çevresi toparlanma adayları","closeProTool();applyQuickFilter('pullback')",""],
+        ["▥","Kurumsal Radar","Olası kurumsal hareket adayları","closeProTool();applyQuickFilter('virman')","pinkCard"],
+        ["★","Favorilerim","Kendi seçtiğin hisseler","closeProTool();applyQuickFilter('favorites')",""],
+        ["◉","Hacim Radar","Göreli hacme göre sıralama","closeProTool();applyQuickFilter('volume')",""]
+    ]
+
+    const cardsHtml=cards.map(([icon,title,description,action,extra])=>`
+        <button class="commandCard ${extra}" onclick="${action}">
+            <span class="commandIcon">${icon}</span>
+            <b>${title}</b>
+            <span>${description}</span>
+        </button>`).join("")
+
+    return `
+        <div class="sheetHero">
+            <div class="dashEyebrow">BIST PRO RADAR</div>
+            <h2>Tüm araçlar tek yerde</h2>
+            <p>Tarama, teknik sepet, alarm, portföy ve kurumsal radar ekranlarını buradan açabilirsin.</p>
+        </div>
+        <div class="commandGrid">${cardsHtml}</div>
+        <div class="warning" style="margin-top:12px">Kurumsal radar ve teknik sepet, halka açık fiyat/hacim verisinden kural tabanlı üretilir. Gerçek AKD veya kesin virman kaydı değildir.</div>
+    `
 }
 
 function riskClass(level){
@@ -5799,9 +6316,11 @@ function detailTab(tab,el){
 load()
 loadKurlar()
 loadMarketTicker()
+updateTerminalClock()
 setInterval(load,10000)
 setInterval(loadMarketTicker,10000)
 setInterval(updateLiveStatus,1000)
+setInterval(updateTerminalClock,1000)
 setInterval(loadKurlar,10000)
 
 </script>
@@ -5809,39 +6328,25 @@ setInterval(loadKurlar,10000)
 
 <div class="mobileBottomNav" id="mobileBottomNav">
  <button class="active" onclick="bottomGo('all',this)"><b>⌂</b>Ana Sayfa</button>
- <button onclick="bottomGo('strong',this)"><b>⚡</b>Sinyaller</button>
- <button onclick="openProTool('basket')"><b>◈</b>Sepet</button>
- <button onclick="bottomGo('volume',this)"><b>▥</b>Hacim</button>
- <button onclick="bottomGo('virman',this)"><b>⇄</b>Virman</button>
+ <button onclick="bottomGo('virman',this)"><b>▥</b>Kurumsal</button>
+ <button onclick="bottomOpen('portfolio',this)"><b>◴</b>Portföy</button>
+ <button onclick="bottomOpen('tools',this)"><b>•••</b>Diğer</button>
 </div>
 
 <script>
-function bottomGo(type,el){
+function bottomSetActive(el){
   document.querySelectorAll('#mobileBottomNav button').forEach(x=>x.classList.remove('active'));
-  el.classList.add('active');
+  if(el) el.classList.add('active');
+}
 
-  const map={
-    all:'all',
-    strong:'strong',
-    volume:'volume',
-    virman:'virman'
-  };
+function bottomGo(type,el){
+  bottomSetActive(el);
+  applyQuickFilter(type||'all');
+}
 
-  const wanted=map[type] || 'all';
-
-  // Mevcut üst filtre butonunu kullan
-  const buttons=[...document.querySelectorAll('button')];
-  const names={
-    all:'Tüm BIST',
-    strong:'Güçlü',
-    volume:'Hacim',
-    virman:'Virman'
-  };
-  const target=buttons.find(b=>b.textContent.trim()===names[wanted]);
-  if(target){
-    target.click();
-    window.scrollTo({top:0,behavior:'smooth'});
-  }
+function bottomOpen(tool,el){
+  bottomSetActive(el);
+  openProTool(tool);
 }
 </script>
 
@@ -5920,7 +6425,7 @@ if __name__ == "__main__":
 
     port = int(os.environ.get("PORT", 5000))
 
-    print("BIST VERİ TERMİNALİ V7.0 PRO+ CANLI TARAMA AKTİF")
+    print("BIST PRO RADAR V7.1 CANLI TARAMA AKTİF")
     print("http://127.0.0.1:%s" % port)
 
     app.run(
