@@ -7,9 +7,10 @@ import websocket
 import json
 import random
 import string
+from datetime import datetime, timedelta, timezone
 
 app = Flask(__name__)
-APP_VERSION = "6.2-CANLI"
+APP_VERSION = "7.0-PRO-SEPET"
 
 TV_URL = "https://scanner.tradingview.com/turkey/scan"
 
@@ -54,6 +55,21 @@ VIRMAN_MAX_TELEGRAM = 5
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()
+
+# Günlük teknik izleme sepeti Telegram'a yalnızca kullanıcı Render ortam
+# değişkeninden özellikle açarsa gider. Varsayılan kapalıdır.
+TELEGRAM_DAILY_BASKET_ENABLED = os.getenv(
+    "TELEGRAM_DAILY_BASKET_ENABLED", "0"
+).strip().lower() in {"1", "true", "yes", "on"}
+try:
+    TELEGRAM_DAILY_BASKET_HOUR = min(
+        23, max(0, int(os.getenv("TELEGRAM_DAILY_BASKET_HOUR", "10")))
+    )
+except (TypeError, ValueError):
+    TELEGRAM_DAILY_BASKET_HOUR = 10
+TURKEY_TZ = timezone(timedelta(hours=3))
+DAILY_BASKET_LAST_SENT = {"date": ""}
+DAILY_BASKET_LOCK = threading.Lock()
 
 VIRMAN_LAST_SENT = {}
 VIRMAN_ALERT_LOCK = threading.Lock()
@@ -175,6 +191,269 @@ def sayi(value, default=0.0):
         return float(value)
     except (TypeError, ValueError):
         return default
+
+
+def fiyat_yuvarla(value):
+    """Fiyatı BIST ekranı için okunur hassasiyette yuvarlar."""
+    value = sayi(value)
+    if value < 1:
+        return round(value, 4)
+    if value < 10:
+        return round(value, 3)
+    return round(value, 2)
+
+
+def teknik_profil(stock):
+    """Mevcut ücretsiz fiyat/hacim alanlarından şeffaf teknik profil üretir."""
+    price = sayi(stock.get("price"))
+    change = sayi(stock.get("change"))
+    rsi = sayi(stock.get("rsi"))
+    relative_volume = sayi(stock.get("relative_volume"))
+    ema20 = sayi(stock.get("ema20"))
+    ema50 = sayi(stock.get("ema50"))
+    macd = sayi(stock.get("macd"))
+    macd_signal = sayi(stock.get("macd_signal"))
+    recommend = sayi(stock.get("recommend"))
+
+    trend_up = price > 0 and ema20 > 0 and ema50 > 0 and price > ema20 > ema50
+    above_ema20 = price > 0 and ema20 > 0 and price > ema20
+    macd_positive = macd > macd_signal
+    rsi_momentum = 54 <= rsi <= 72
+    volume_supported = relative_volume >= 1.2
+    volume_burst = relative_volume >= 2 and above_ema20
+
+    score = 0
+    reasons = []
+
+    if trend_up:
+        score += 30
+        reasons.append("Fiyat EMA20 ve EMA50 üzerinde")
+    elif above_ema20:
+        score += 16
+        reasons.append("Fiyat EMA20 üzerinde")
+
+    if rsi_momentum:
+        score += 22
+        reasons.append("RSI pozitif momentum bölgesinde")
+    elif 48 <= rsi < 54:
+        score += 12
+        reasons.append("RSI toparlanma bölgesinde")
+    elif rsi > 72:
+        score += 5
+        reasons.append("RSI güçlü ama yüksek bölgede")
+
+    if relative_volume >= 2.5:
+        score += 24
+        reasons.append("Göreli hacim güçlü")
+    elif volume_supported:
+        score += 15
+        reasons.append("Hacim ortalama üzerinde")
+
+    if macd_positive:
+        score += 18
+        reasons.append("MACD alım yönünü destekliyor")
+
+    if 0.25 <= change <= 6:
+        score += 10
+        reasons.append("Günlük hareket dengeli pozitif")
+    elif 0 < change < 0.25:
+        score += 4
+    elif change < -4:
+        score -= 8
+
+    if recommend >= 0.2:
+        score += 6
+
+    score = max(0, min(100, int(round(score))))
+    breakout = (
+        trend_up
+        and relative_volume >= 1.25
+        and macd_positive
+        and 0.25 <= change <= 8
+    )
+    momentum = trend_up and rsi_momentum and macd_positive and score >= 65
+    pullback = (
+        above_ema20
+        and ema20 > 0
+        and price <= ema20 * 1.035
+        and 44 <= rsi <= 60
+        and macd_positive
+    )
+
+    if breakout:
+        label = "HACİMLİ KIRILIM"
+    elif momentum:
+        label = "POZİTİF MOMENTUM"
+    elif pullback:
+        label = "TOPARLANMA İZLE"
+    elif volume_burst:
+        label = "HACİM HAREKETİ"
+    else:
+        label = "NÖTR İZLE"
+
+    if abs(change) >= 6 or relative_volume >= 4 or rsi >= 74:
+        risk_level = "YÜKSEK"
+    elif abs(change) >= 3 or relative_volume >= 2:
+        risk_level = "ORTA"
+    else:
+        risk_level = "DENGELİ"
+
+    return {
+        "score": score,
+        "label": label,
+        "trend": "YUKARI" if trend_up else ("EMA20 ÜSTÜ" if above_ema20 else "ZAYIF"),
+        "breakout": breakout,
+        "momentum": momentum,
+        "pullback": pullback,
+        "volume_burst": volume_burst,
+        "risk_level": risk_level,
+        "reasons": reasons[:4]
+    }
+
+
+def sepet_puani(stock):
+    """Günlük teknik izleme sepetini sıralamak için kullanılan şeffaf puan."""
+    technical = stock.get("technical") or teknik_profil(stock)
+    price = sayi(stock.get("price"))
+    volume = sayi(stock.get("volume"))
+    relative_volume = sayi(stock.get("relative_volume"))
+    change = sayi(stock.get("change"))
+
+    score = technical.get("score", 0) + min(12, int(max(0, relative_volume - 1) * 6))
+    if technical.get("breakout"):
+        score += 10
+    if technical.get("momentum"):
+        score += 6
+    if stock.get("score", 0) >= 110:
+        score += 6
+    if price * volume >= 100_000_000:
+        score += 5
+    if not 0 <= change <= 9:
+        score -= 12
+
+    return max(0, min(150, int(round(score))))
+
+
+def gunluk_teknik_sepet(stocks, limit=5):
+    """Yatırım tavsiyesi olmayan, gün içi takip için otomatik teknik sepet."""
+    eligible = []
+
+    for stock in stocks:
+        technical = stock.get("technical") or teknik_profil(stock)
+        price = sayi(stock.get("price"))
+        change = sayi(stock.get("change"))
+
+        if price <= 0 or change < -5.5 or change > 9.5:
+            continue
+        if technical.get("score", 0) < 62:
+            continue
+        if not (
+            technical.get("breakout")
+            or technical.get("momentum")
+            or technical.get("pullback")
+        ):
+            continue
+
+        item = dict(stock)
+        item["technical"] = technical
+        item["basket_score"] = sepet_puani(item)
+        eligible.append(item)
+
+    # Piyasa zayıfsa sepet boş kalmasın; daha yumuşak teknik eşiğe düşer.
+    if len(eligible) < limit:
+        eligible = []
+        for stock in stocks:
+            technical = stock.get("technical") or teknik_profil(stock)
+            price = sayi(stock.get("price"))
+            change = sayi(stock.get("change"))
+            if price <= 0 or change < -6 or change > 9.5:
+                continue
+            if technical.get("score", 0) < 50:
+                continue
+            item = dict(stock)
+            item["technical"] = technical
+            item["basket_score"] = sepet_puani(item)
+            eligible.append(item)
+
+    eligible.sort(
+        key=lambda stock: (
+            stock.get("basket_score", 0),
+            (stock.get("technical") or {}).get("score", 0),
+            sayi(stock.get("relative_volume")),
+            sayi(stock.get("market_cap"))
+        ),
+        reverse=True
+    )
+
+    basket = []
+    for rank, stock in enumerate(eligible[:limit], start=1):
+        price = sayi(stock.get("price"))
+        technical = stock.get("technical") or {}
+        risk = technical.get("risk_level", "DENGELİ")
+        band = 0.006 if risk == "DENGELİ" else (0.009 if risk == "ORTA" else 0.013)
+        stop_rate = 0.975 if risk == "DENGELİ" else (0.965 if risk == "ORTA" else 0.95)
+
+        basket.append({
+            "rank": rank,
+            "symbol": stock.get("symbol"),
+            "description": stock.get("description", ""),
+            "price": stock.get("price"),
+            "change": stock.get("change"),
+            "relative_volume": stock.get("relative_volume"),
+            "score": stock.get("score"),
+            "technical_score": technical.get("score", 0),
+            "basket_score": stock.get("basket_score", 0),
+            "label": technical.get("label", "NÖTR İZLE"),
+            "trend": technical.get("trend", "-"),
+            "risk_level": risk,
+            "reasons": technical.get("reasons", []),
+            "watch_band_low": fiyat_yuvarla(price * (1 - band)),
+            "watch_band_high": fiyat_yuvarla(price * (1 + band)),
+            "risk_stop": fiyat_yuvarla(price * stop_rate),
+            "watch_target_1": fiyat_yuvarla(price * (1 + (1 - stop_rate))),
+            "watch_target_2": fiyat_yuvarla(price * (1 + (1 - stop_rate) * 2))
+        })
+
+    return basket
+
+
+def piyasa_genisligi(stocks):
+    total = len(stocks)
+    rising = sum(1 for stock in stocks if sayi(stock.get("change")) > 0)
+    falling = sum(1 for stock in stocks if sayi(stock.get("change")) < 0)
+    flat = max(0, total - rising - falling)
+    momentum = sum(
+        1 for stock in stocks
+        if (stock.get("technical") or {}).get("momentum")
+    )
+    breakouts = sum(
+        1 for stock in stocks
+        if (stock.get("technical") or {}).get("breakout")
+    )
+    volume_bursts = sum(
+        1 for stock in stocks
+        if (stock.get("technical") or {}).get("volume_burst")
+    )
+    ratio = round(rising / max(1, falling), 2)
+
+    if ratio >= 1.35:
+        status = "POZİTİF GENİŞLİK"
+    elif ratio <= 0.75:
+        status = "ZAYIF GENİŞLİK"
+    else:
+        status = "DENGELİ PİYASA"
+
+    return {
+        "total": total,
+        "rising": rising,
+        "falling": falling,
+        "flat": flat,
+        "advance_decline_ratio": ratio,
+        "momentum": momentum,
+        "breakouts": breakouts,
+        "volume_bursts": volume_bursts,
+        "status": status
+    }
 
 
 def virman_analizi(s):
@@ -363,6 +642,7 @@ def fetch_market():
 
             stock["score"] = puanla(stock)
             stock["signal"] = sinyal_adi(stock["score"])
+            stock["technical"] = teknik_profil(stock)
             stock["institutional"] = virman_analizi(stock)
 
             stocks.append(stock)
@@ -902,6 +1182,62 @@ def virman_telegram_alarmlari(stocks):
                 sent.append(symbol)
     return sent
 
+
+def gunluk_sepet_telegram_raporu(stocks):
+    """İsteğe bağlı, günde en fazla bir kez teknik sepet özeti gönderir."""
+    if not (
+        TELEGRAM_DAILY_BASKET_ENABLED
+        and TELEGRAM_BOT_TOKEN
+        and TELEGRAM_CHAT_ID
+    ):
+        return False
+
+    now = datetime.now(TURKEY_TZ)
+    today = now.strftime("%Y-%m-%d")
+    if now.weekday() > 4 or now.hour < TELEGRAM_DAILY_BASKET_HOUR:
+        return False
+
+    with DAILY_BASKET_LOCK:
+        if DAILY_BASKET_LAST_SENT.get("date") == today:
+            return False
+
+    basket = gunluk_teknik_sepet(stocks)
+    if not basket:
+        return False
+
+    lines = [
+        "📊 GÜNLÜK TEKNİK İZLEME SEPETİ",
+        f"{now.strftime('%d.%m.%Y %H:%M')} • {len(basket)} hisse",
+        ""
+    ]
+    for item in basket:
+        lines.extend([
+            f"{item['rank']}. {item['symbol']} — {item['label']}",
+            f"Fiyat: {sayi(item['price']):.2f} TL | %{sayi(item['change']):+.2f}",
+            f"Teknik: {item['technical_score']}/100 | Hacim: {sayi(item['relative_volume']):.2f}x",
+            ""
+        ])
+
+    lines.extend([
+        "Bu sepet otomatik teknik takip listesidir.",
+        "Yatırım tavsiyesi değildir."
+    ])
+
+    try:
+        response = requests.post(
+            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+            data={"chat_id": TELEGRAM_CHAT_ID, "text": "\n".join(lines)},
+            timeout=15
+        )
+        response.raise_for_status()
+    except Exception as exc:
+        print("Sepet Telegram hatası:", type(exc).__name__)
+        return False
+
+    with DAILY_BASKET_LOCK:
+        DAILY_BASKET_LAST_SENT["date"] = today
+    return True
+
 def background_loop():
     while True:
         try:
@@ -914,6 +1250,7 @@ def background_loop():
                 "sn"
             )
             virman_telegram_alarmlari(stocks)
+            gunluk_sepet_telegram_raporu(stocks)
         except Exception as e:
             print("Arka plan veri hatası:", e)
             with CACHE_LOCK:
@@ -950,6 +1287,8 @@ start_market_worker()
 @app.route("/api/market")
 def api_market():
     stocks = get_market()
+    daily_basket = gunluk_teknik_sepet(stocks)
+    breadth = piyasa_genisligi(stocks)
     with CACHE_LOCK:
         updated = CACHE["updated"]
         last_error = CACHE["last_error"]
@@ -964,7 +1303,36 @@ def api_market():
         "updated": updated,
         "refresh_seconds": MARKET_REFRESH_SECONDS,
         "last_error": last_error,
-        "source": "Toplu BIST canlı tarama"
+        "source": "Toplu BIST canlı tarama",
+        "daily_basket": daily_basket,
+        "market_breadth": breadth,
+        "telegram_daily_basket_enabled": bool(
+            TELEGRAM_DAILY_BASKET_ENABLED
+            and TELEGRAM_BOT_TOKEN
+            and TELEGRAM_CHAT_ID
+        )
+    })
+    response.headers["Cache-Control"] = "no-store, max-age=0"
+    return response
+
+
+@app.route("/api/basket")
+def api_basket():
+    stocks = get_market()
+    with CACHE_LOCK:
+        updated = CACHE["updated"]
+
+    response = jsonify({
+        "ok": True,
+        "title": "Günlük Teknik İzleme Sepeti",
+        "basket": gunluk_teknik_sepet(stocks),
+        "market_breadth": piyasa_genisligi(stocks),
+        "updated": updated,
+        "refresh_seconds": MARKET_REFRESH_SECONDS,
+        "note": (
+            "Sepet; trend, RSI, MACD, göreli hacim ve günlük hareketten "
+            "oluşan kural tabanlı izleme listesidir; alım-satım tavsiyesi değildir."
+        )
     })
     response.headers["Cache-Control"] = "no-store, max-age=0"
     return response
@@ -1084,6 +1452,8 @@ def api_stock(symbol):
 
 
 KUR_CACHE = {"data": None, "updated": 0}
+MARKET_TICKER_CACHE = {"data": None, "updated": 0}
+MARKET_TICKER_LOCK = threading.Lock()
 
 def fetch_kurlar():
     if KUR_CACHE["data"] and time.time() - KUR_CACHE["updated"] < 30:
@@ -1159,6 +1529,107 @@ def api_kurlar():
         "ok": True,
         "data": fetch_kurlar()
     })
+
+
+def ticker_sayi(value):
+    """Farklı ücretsiz kur uç noktalarından ortak fiyat alanını ayıklar."""
+    if isinstance(value, dict):
+        value = ilk_deger(
+            value,
+            (
+                "sell", "satis", "satış", "Selling", "price", "last",
+                "close", "value", "rate", "TL"
+            )
+        )
+    return sayi(value, None)
+
+
+def fetch_bist100_quote():
+    """BIST 100 endeksini hisse taramasından bağımsız ve güvenli çeker."""
+    payload = {
+        "symbols": {"tickers": ["BIST:XU100"], "query": {"types": []}},
+        "columns": ["name", "description", "close", "change"]
+    }
+    try:
+        response = requests.post(
+            TV_URL,
+            headers=HEADERS,
+            json=payload,
+            timeout=12
+        )
+        response.raise_for_status()
+        rows = response.json().get("data", [])
+        if not rows:
+            return {"price": None, "change": None}
+        values = rows[0].get("d") or []
+        return {
+            "price": values[2] if len(values) > 2 else None,
+            "change": values[3] if len(values) > 3 else None
+        }
+    except Exception as exc:
+        print("BIST 100 bant verisi hatası:", type(exc).__name__)
+        return {"price": None, "change": None}
+
+
+def fetch_market_ticker():
+    """Üstteki kayan bant için küçük ve önbellekli piyasa özeti."""
+    with MARKET_TICKER_LOCK:
+        cached = MARKET_TICKER_CACHE.get("data")
+        if cached and time.time() - MARKET_TICKER_CACHE["updated"] < 10:
+            return cached
+
+        rates = fetch_kurlar()
+        bist100 = fetch_bist100_quote()
+        data = {
+            "updated": int(time.time()),
+            "items": [
+                {
+                    "key": "bist100",
+                    "label": "BIST 100",
+                    "price": bist100.get("price"),
+                    "change": bist100.get("change"),
+                    "digits": 0
+                },
+                {
+                    "key": "usd",
+                    "label": "DOLAR/TL",
+                    "price": ticker_sayi(rates.get("usd")),
+                    "change": None,
+                    "digits": 4
+                },
+                {
+                    "key": "eur",
+                    "label": "EURO/TL",
+                    "price": ticker_sayi(rates.get("eur")),
+                    "change": None,
+                    "digits": 4
+                },
+                {
+                    "key": "gram",
+                    "label": "GRAM ALTIN",
+                    "price": ticker_sayi(rates.get("gram")),
+                    "change": None,
+                    "digits": 2
+                },
+                {
+                    "key": "ceyrek",
+                    "label": "ÇEYREK ALTIN",
+                    "price": ticker_sayi(rates.get("ceyrek")),
+                    "change": None,
+                    "digits": 2
+                }
+            ]
+        }
+        MARKET_TICKER_CACHE["data"] = data
+        MARKET_TICKER_CACHE["updated"] = data["updated"]
+        return data
+
+
+@app.route("/api/ticker")
+def api_ticker():
+    response = jsonify({"ok": True, "data": fetch_market_ticker()})
+    response.headers["Cache-Control"] = "no-store, max-age=0"
+    return response
 
 
 # =========================
@@ -1410,7 +1881,7 @@ HTML = r'''
 <meta name="viewport"
 content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
 
-<title>BIST Veri Terminali PRO</title>
+<title>BIST Veri Terminali PRO+</title>
 
 <script src="https://telegram.org/js/telegram-web-app.js"></script>
 <!-- AKD ekran görüntüsünü telefonda, sunucuya göndermeden okumak için. -->
@@ -2223,6 +2694,511 @@ body{
     }
 }
 
+/* ===== V7 PRO TERMINAL DASHBOARD ===== */
+html,body{
+    width:100%;
+    max-width:100%;
+    overflow-x:hidden;
+}
+
+.top{
+    background:linear-gradient(155deg,rgba(10,18,31,.98),rgba(7,11,18,.97));
+}
+
+.marketTape{
+    width:100%;
+    overflow:hidden;
+    margin:11px 0 1px;
+    border:1px solid #1c2b3e;
+    border-radius:12px;
+    background:linear-gradient(90deg,#0c1522,#0b1019);
+}
+
+.tapeTrack{
+    display:flex;
+    width:max-content;
+    min-width:100%;
+    animation:tapeMove 32s linear infinite;
+}
+
+.tapeTrack.paused{animation-play-state:paused}
+.marketTape:active .tapeTrack{animation-play-state:paused}
+
+.tapeSet{
+    display:flex;
+    align-items:stretch;
+}
+
+.tapeItem{
+    display:flex;
+    align-items:center;
+    gap:8px;
+    min-width:152px;
+    padding:9px 12px;
+    border-right:1px solid #1d2b3d;
+}
+
+.tapeLabel{
+    color:#8291a8;
+    font-size:10px;
+    font-weight:900;
+    white-space:nowrap;
+}
+
+.tapePrice{
+    color:#e7effc;
+    font-size:12px;
+    font-weight:900;
+    white-space:nowrap;
+}
+
+.tapeChange{
+    font-size:10px;
+    font-weight:900;
+    white-space:nowrap;
+}
+
+.tapeChange.flat{color:#718198}
+
+@keyframes tapeMove{
+    from{transform:translateX(0)}
+    to{transform:translateX(-50%)}
+}
+
+.terminalDashboard{
+    padding:12px 14px 3px;
+}
+
+.dashboardHero{
+    position:relative;
+    overflow:hidden;
+    min-height:132px;
+    padding:16px;
+    border:1px solid #294569;
+    border-radius:19px;
+    background:
+        radial-gradient(circle at 90% 10%,rgba(53,126,255,.30),transparent 33%),
+        linear-gradient(135deg,#101f36,#0d141f 62%,#12111e);
+}
+
+.dashboardHero:after{
+    content:"";
+    position:absolute;
+    width:180px;
+    height:180px;
+    right:-77px;
+    bottom:-105px;
+    border:1px solid rgba(98,158,255,.22);
+    border-radius:50%;
+    box-shadow:0 0 0 23px rgba(98,158,255,.03),0 0 0 47px rgba(98,158,255,.025);
+}
+
+.dashEyebrow{
+    color:#81b7ff;
+    font-size:10px;
+    font-weight:900;
+    letter-spacing:.8px;
+}
+
+.dashTitle{
+    margin-top:5px;
+    max-width:78%;
+    color:#f1f5fd;
+    font-size:19px;
+    font-weight:900;
+    line-height:1.15;
+}
+
+.dashText{
+    max-width:80%;
+    margin-top:7px;
+    color:#9aa9be;
+    font-size:11px;
+    line-height:1.42;
+}
+
+.dashButton{
+    position:relative;
+    z-index:1;
+    margin-top:12px;
+    padding:9px 12px;
+    border:1px solid #448eff;
+    border-radius:10px;
+    background:#1d69df;
+    color:white;
+    font-size:11px;
+    font-weight:900;
+}
+
+.breadthGrid{
+    display:grid;
+    grid-template-columns:repeat(4,1fr);
+    gap:7px;
+    margin-top:9px;
+}
+
+.breadthCard{
+    min-width:0;
+    padding:10px 7px;
+    border:1px solid #1b2a3d;
+    border-radius:12px;
+    background:#0d1623;
+    text-align:center;
+}
+
+.breadthCard span{
+    display:block;
+    overflow:hidden;
+    color:#74839a;
+    font-size:9px;
+    font-weight:800;
+    text-overflow:ellipsis;
+    white-space:nowrap;
+}
+
+.breadthCard b{
+    display:block;
+    margin-top:4px;
+    color:#eaf1fc;
+    font-size:15px;
+}
+
+.proQuickTools{
+    display:grid;
+    grid-template-columns:repeat(3,1fr);
+    gap:8px;
+    padding:11px 14px 4px;
+}
+
+.quickTool{
+    min-height:72px;
+    padding:10px 7px;
+    border:1px solid #1c2c40;
+    border-radius:14px;
+    background:linear-gradient(145deg,#101a28,#0d141e);
+    color:#bdcadb;
+    font-size:10px;
+    font-weight:800;
+    line-height:1.25;
+}
+
+.quickTool b{
+    display:block;
+    margin-bottom:5px;
+    color:#78adff;
+    font-size:18px;
+    line-height:19px;
+}
+
+.quickTool.featured{
+    border-color:#3d6ca6;
+    background:linear-gradient(145deg,#163155,#101c2d);
+    color:#e5efff;
+}
+
+.quickTool.featured b{color:#63d8ff}
+.quickTool.orange b{color:#ffc35f}
+.quickTool.greenTool b{color:#45dea7}
+.quickTool.pink b{color:#ff8ba4}
+
+#kurBar{display:none!important}
+
+.stockTitleLine{
+    display:flex;
+    align-items:center;
+    gap:7px;
+}
+
+.favoriteButton{
+    width:28px;
+    height:28px;
+    padding:0;
+    border:1px solid #27364a;
+    border-radius:9px;
+    background:#111d2b;
+    color:#8293a9;
+    font-size:15px;
+}
+
+.favoriteButton.active{
+    border-color:#c28a27;
+    background:#33250e;
+    color:#ffd067;
+}
+
+.stockSetup{
+    display:inline-block;
+    margin-top:9px;
+    padding:5px 8px;
+    border:1px solid #24537b;
+    border-radius:8px;
+    background:#0d263c;
+    color:#87c5ff;
+    font-size:10px;
+    font-weight:900;
+}
+
+.toolSheet{
+    display:none;
+    position:fixed;
+    inset:0;
+    z-index:10001;
+    overflow-y:auto;
+    overscroll-behavior:contain;
+    padding:0 0 86px;
+    background:#070b12;
+}
+
+.toolSheet.open{display:block}
+
+.toolHead{
+    position:sticky;
+    top:0;
+    z-index:2;
+    display:flex;
+    align-items:center;
+    gap:10px;
+    padding:13px 14px;
+    border-bottom:1px solid #1e2a3b;
+    background:rgba(8,13,21,.97);
+    backdrop-filter:blur(12px);
+}
+
+.toolHead button{
+    border:1px solid #2b3e56;
+    border-radius:10px;
+    padding:9px 11px;
+    background:#101b29;
+    color:#e3ecfa;
+    font-weight:800;
+}
+
+.toolHeadTitle{
+    overflow:hidden;
+    color:#eff5ff;
+    font-size:16px;
+    font-weight:900;
+    text-overflow:ellipsis;
+    white-space:nowrap;
+}
+
+.toolPanel{padding:13px}
+
+.sheetHero{
+    position:relative;
+    overflow:hidden;
+    padding:16px;
+    border:1px solid #274c74;
+    border-radius:17px;
+    background:linear-gradient(135deg,#112b4c,#0c1724 72%);
+}
+
+.sheetHero h2{
+    margin:4px 0 6px;
+    color:#f4f7fd;
+    font-size:20px;
+}
+
+.sheetHero p{
+    margin:0;
+    color:#a8bad0;
+    font-size:12px;
+    line-height:1.5;
+}
+
+.toolSectionTitle{
+    margin:16px 2px 8px;
+    color:#aab9cd;
+    font-size:12px;
+    font-weight:900;
+    letter-spacing:.3px;
+}
+
+.basketCard,.portfolioCard,.alertCard,.riskCard{
+    margin:9px 0;
+    padding:14px;
+    border:1px solid #1d2d42;
+    border-radius:15px;
+    background:#0d1622;
+}
+
+.basketTop,.portfolioRowTop{
+    display:flex;
+    align-items:flex-start;
+    justify-content:space-between;
+    gap:10px;
+}
+
+.basketRank{
+    display:inline-flex;
+    align-items:center;
+    justify-content:center;
+    min-width:28px;
+    height:28px;
+    margin-right:8px;
+    border-radius:9px;
+    background:#174378;
+    color:#dcecff;
+    font-size:12px;
+    font-weight:900;
+}
+
+.basketSymbol{font-size:17px;font-weight:900}
+.basketName{margin-top:3px;color:#8291a7;font-size:11px}
+.basketPrice{text-align:right;font-size:17px;font-weight:900}
+.basketMeta{margin-top:10px;color:#9dacc0;font-size:11px;line-height:1.55}
+.basketReasons{margin:10px 0 0;padding:0;list-style:none;color:#b6c5d7;font-size:11px;line-height:1.6}
+.basketReasons li:before{content:"• ";color:#58bbff}
+
+.levelGrid{
+    display:grid;
+    grid-template-columns:repeat(3,1fr);
+    gap:6px;
+    margin-top:11px;
+}
+
+.levelCell{
+    padding:8px 5px;
+    border-radius:9px;
+    background:#121f2e;
+    text-align:center;
+}
+
+.levelCell span{display:block;color:#8090a5;font-size:9px}
+.levelCell b{display:block;margin-top:3px;color:#e8effa;font-size:11px}
+
+.sheetActions{
+    display:grid;
+    grid-template-columns:1fr 1fr;
+    gap:8px;
+    margin-top:12px;
+}
+
+.sheetButton{
+    border:1px solid #2e629f;
+    border-radius:10px;
+    padding:10px 8px;
+    background:#155cc1;
+    color:white;
+    font-size:11px;
+    font-weight:900;
+}
+
+.sheetButton.secondary{
+    border-color:#31445d;
+    background:#162233;
+    color:#c0d0e5;
+}
+
+.formGrid{
+    display:grid;
+    grid-template-columns:1fr 1fr;
+    gap:8px;
+}
+
+.formGrid .wide{grid-column:1/-1}
+
+.formInput,.formSelect{
+    width:100%;
+    min-height:42px;
+    border:1px solid #2a3a50;
+    border-radius:10px;
+    padding:10px;
+    outline:0;
+    background:#09121d;
+    color:#edf3fb;
+    font-size:12px;
+}
+
+.formLabel{display:block;margin:11px 1px 6px;color:#97a8bf;font-size:10px;font-weight:800}
+
+.portfolioTotals{
+    display:grid;
+    grid-template-columns:repeat(3,1fr);
+    gap:7px;
+    margin-top:10px;
+}
+
+.portfolioTotals div{padding:10px 7px;border-radius:10px;background:#111d2b;text-align:center}
+.portfolioTotals span{display:block;color:#7f90a7;font-size:9px}
+.portfolioTotals b{display:block;margin-top:4px;font-size:12px}
+.portfolioList{margin-top:12px}
+.portfolioItem{padding:12px 0;border-bottom:1px solid #1a2737}
+.portfolioItem:last-child{border-bottom:0}
+.portfolioInfo{margin-top:8px;color:#90a0b4;font-size:11px;line-height:1.55}
+
+.iconTextButton{
+    border:0;
+    border-radius:8px;
+    padding:7px 8px;
+    background:#172538;
+    color:#bcd2ee;
+    font-size:10px;
+    font-weight:800;
+}
+
+.iconTextButton.danger{background:#351720;color:#ff9ba8}
+
+.riskResult{
+    margin-top:12px;
+    padding:13px;
+    border:1px solid #265a8c;
+    border-radius:12px;
+    background:#0c2033;
+}
+
+.riskResultGrid{display:grid;grid-template-columns:repeat(2,1fr);gap:8px}
+.riskResultGrid div{padding:9px;border-radius:9px;background:#101d2a}
+.riskResultGrid span{display:block;color:#8293aa;font-size:10px}
+.riskResultGrid b{display:block;margin-top:4px;color:#edf4fd;font-size:13px}
+
+.alertList{margin-top:11px}
+.alertItem{padding:11px 0;border-bottom:1px solid #1b2939}
+.alertItem:last-child{border-bottom:0}
+.alertDescription{margin-top:4px;color:#9dacc0;font-size:11px;line-height:1.4}
+
+.toast{
+    display:none;
+    position:fixed;
+    left:12px;
+    right:12px;
+    bottom:79px;
+    z-index:10050;
+    padding:13px 14px;
+    border:1px solid #316da9;
+    border-radius:13px;
+    background:#10243b;
+    color:#edf6ff;
+    font-size:12px;
+    font-weight:800;
+    box-shadow:0 12px 30px rgba(0,0,0,.35);
+}
+
+.toast.show{display:block;animation:toastIn .25s ease-out}
+@keyframes toastIn{from{opacity:0;transform:translateY(12px)}to{opacity:1;transform:translateY(0)}}
+
+.portraitGuard{display:none}
+@media (orientation:landscape) and (max-height:620px){
+    .portraitGuard{
+        display:flex;
+        position:fixed;
+        inset:0;
+        z-index:20000;
+        align-items:center;
+        justify-content:center;
+        padding:28px;
+        background:#070b12;
+        color:#dfeafa;
+        text-align:center;
+        font-weight:800;
+        line-height:1.6;
+    }
+}
+
+@media (prefers-reduced-motion:reduce){
+    .tapeTrack{animation:none}
+}
+
 </style>
 
 <style>
@@ -2274,11 +3250,19 @@ body{padding-bottom:76px!important;}
 <div id="home">
 
 <div class="top">
-<div class="title">BIST Veri Terminali <span style="font-size:11px;color:#64a5ff">PRO</span></div>
+<div class="title">BIST Veri Terminali <span style="font-size:11px;color:#64a5ff">PRO+</span></div>
 <div class="sub">Piyasa • Teknik • Sinyal • Canlı Tarama • Takas • Virman • AI</div>
 <div id="liveStatus" class="liveStatus">
 <span class="liveDot"></span>
 <span id="liveStatusText">Tüm BIST canlı taramaya hazırlanıyor...</span>
+</div>
+
+<div class="marketTape" aria-label="Canlı piyasa bandı">
+<div id="tapeTrack" class="tapeTrack paused">
+<div class="tapeSet">
+<div class="tapeItem"><span class="tapeLabel">CANLI PİYASA</span><span class="tapePrice">Yükleniyor...</span></div>
+</div>
+</div>
 </div>
 
 <input
@@ -2288,6 +3272,13 @@ placeholder="🔎 Hisse ara: ASELS, THYAO, TUPRS..."
 oninput="renderStocks()">
 </div>
 
+<div id="terminalDashboard" class="terminalDashboard">
+<div class="dashboardHero">
+<div class="dashEyebrow">BIST PRO RADAR</div>
+<div class="dashTitle">Günlük teknik görünüm hazırlanıyor</div>
+<div class="dashText">Tüm BIST taranıyor; güçlü teknik koşullar oluşunca burada özetlenecek.</div>
+</div>
+</div>
 
 <div id="kurBar" style="
     margin:12px 14px 4px;
@@ -2352,7 +3343,23 @@ oninput="renderStocks()">
 <button onclick="setFilter('up',this)">Yükselen</button>
 <button onclick="setFilter('down',this)">Düşen</button>
 <button onclick="setFilter('volume',this)">Hacim</button>
+<button onclick="setFilter('breakout',this)">Kırılım</button>
+<button onclick="setFilter('momentum',this)">Momentum</button>
+<button onclick="setFilter('pullback',this)">Toparlanma</button>
+<button onclick="setFilter('favorites',this)">★ Favori</button>
 <button onclick="setFilter('virman',this)">Virman</button>
+</div>
+
+<div class="proQuickTools" aria-label="Profesyonel araçlar">
+<button class="quickTool featured" onclick="openProTool('basket')"><b>◈</b>Günlük Sepet</button>
+<button class="quickTool greenTool" onclick="openProTool('portfolio')"><b>▣</b>Portföy</button>
+<button class="quickTool orange" onclick="openProTool('alerts')"><b>♧</b>Alarmlar</button>
+<button class="quickTool" onclick="applyQuickFilter('breakout')"><b>↗</b>Kırılım</button>
+<button class="quickTool" onclick="applyQuickFilter('momentum')"><b>⚡</b>Momentum</button>
+<button class="quickTool" onclick="applyQuickFilter('pullback')"><b>⌁</b>Toparlanma</button>
+<button class="quickTool pink" onclick="applyQuickFilter('volume')"><b>▥</b>Hacim Radar</button>
+<button class="quickTool" onclick="applyQuickFilter('favorites')"><b>★</b>Favoriler</button>
+<button class="quickTool orange" onclick="openProTool('risk')"><b>◫</b>Risk Hesabı</button>
 </div>
 
 <div id="list" class="list">
@@ -2377,6 +3384,7 @@ oninput="renderStocks()">
 
 <div class="detailTabs proTabs">
 <button class="active" onclick="detailTab('summary',this)">ÖZET</button>
+<button onclick="detailTab('chart',this)">GRAFİK</button>
 <button onclick="detailTab('depth',this)">DERİNLİK</button>
 <button onclick="detailTab('akd',this)">AKD</button>
 <button onclick="detailTab('kademe',this)">KADEME</button>
@@ -2389,11 +3397,22 @@ oninput="renderStocks()">
 
 </div>
 
+<div id="toolSheet" class="toolSheet" aria-hidden="true">
+<div class="toolHead">
+<button onclick="closeProTool()">← Geri</button>
+<div id="toolHeadTitle" class="toolHeadTitle">Pro Araçlar</div>
+</div>
+<div id="toolPanel" class="toolPanel"></div>
+</div>
+
 </div>
 
 <div class="bottom">
 Veriler analiz amaçlıdır • Yatırım tavsiyesi değildir
 </div>
+
+<div id="toast" class="toast" role="status"></div>
+<div class="portraitGuard">Uygulamayı rahat kullanmak için telefonu dik konuma çevir.</div>
 
 <script>
 
@@ -2405,6 +3424,129 @@ let marketDisplayLimit = 150
 let lastPrices = new Map()
 let priceMoves = new Map()
 let marketMeta = {updated:0, refreshSeconds:10, lastError:null}
+let dailyBasket = []
+let marketBreadth = {}
+let telegramBasketEnabled = false
+let proCurrentTool = "basket"
+let portfolioEditingSymbol = ""
+let portfolioDraft = null
+let toastTimer = null
+
+function loadLocal(key,fallback){
+    try{
+        const parsed=JSON.parse(localStorage.getItem(key)||"")
+        return parsed===null ? fallback : parsed
+    }catch(e){
+        return fallback
+    }
+}
+
+function saveLocal(key,value){
+    try{localStorage.setItem(key,JSON.stringify(value))}catch(e){}
+}
+
+let favorites = Array.from(new Set(
+    (loadLocal("bist_pro_favorites",[])||[])
+        .map(x=>String(x||"").trim().toUpperCase())
+        .filter(Boolean)
+))
+let portfolio = (loadLocal("bist_pro_portfolio",[])||[])
+    .filter(x=>x&&x.symbol)
+let alerts = (loadLocal("bist_pro_alerts",[])||[])
+    .filter(x=>x&&x.id)
+let alertHistory = (loadLocal("bist_pro_alert_history",[])||[])
+const savedMarket=loadLocal("bist_pro_last_market",null)
+
+if(savedMarket && Array.isArray(savedMarket.stocks) && savedMarket.stocks.length){
+    allStocks=savedMarket.stocks
+    dailyBasket=Array.isArray(savedMarket.dailyBasket)?savedMarket.dailyBasket:[]
+    marketBreadth=savedMarket.marketBreadth||{}
+    telegramBasketEnabled=Boolean(savedMarket.telegramBasketEnabled)
+    marketMeta={
+        updated:Number(savedMarket.updated)||0,
+        refreshSeconds:Number(savedMarket.refreshSeconds)||10,
+        lastError:"cached"
+    }
+    setTimeout(()=>applyMarketUi(false),0)
+}
+
+function trNumber(value,defaultValue=0){
+    if(value===null || value===undefined || value==="") return defaultValue
+    if(typeof value==="number") return Number.isFinite(value)?value:defaultValue
+    let raw=String(value).trim().replace(/\s/g,"")
+    if(raw.includes(",") && raw.includes(".")){
+        raw=raw.lastIndexOf(",")>raw.lastIndexOf(".")
+            ? raw.replaceAll(".","").replace(",",".")
+            : raw.replaceAll(",","")
+    }else if(raw.includes(",")){
+        raw=raw.replace(",",".")
+    }
+    const number=Number(raw)
+    return Number.isFinite(number)?number:defaultValue
+}
+
+function isFavorite(symbol){
+    return favorites.includes(String(symbol||"").toUpperCase())
+}
+
+function toggleFavorite(symbol){
+    symbol=String(symbol||"").trim().toUpperCase()
+    if(!symbol) return
+    favorites=isFavorite(symbol)
+        ? favorites.filter(x=>x!==symbol)
+        : [...favorites,symbol]
+    saveLocal("bist_pro_favorites",favorites)
+    renderStocks()
+    if(document.getElementById("toolSheet").classList.contains("open") && proCurrentTool==="portfolio"){
+        renderProTool()
+    }
+}
+
+function applyQuickFilter(nextFilter){
+    filter=nextFilter
+    marketDisplayLimit=150
+    document.querySelectorAll(".tabs button").forEach(button=>{
+        button.classList.toggle("active",button.getAttribute("onclick")===`setFilter('${nextFilter}',this)`)
+    })
+    renderStocks()
+    window.scrollTo({top:0,behavior:"smooth"})
+}
+
+function showToast(message){
+    const toast=document.getElementById("toast")
+    if(!toast) return
+    toast.textContent=message
+    toast.classList.add("show")
+    clearTimeout(toastTimer)
+    toastTimer=setTimeout(()=>toast.classList.remove("show"),5200)
+}
+
+async function fetchJsonWithTimeout(url,options={},timeoutMs=8500){
+    const controller=typeof AbortController!=="undefined" ? new AbortController() : null
+    const timeout=controller
+        ? setTimeout(()=>controller.abort(),timeoutMs)
+        : null
+    try{
+        const response=await fetch(
+            url,
+            {...options,...(controller?{signal:controller.signal}:{})}
+        )
+        if(!response.ok) throw new Error("Bağlantı isteği başarısız")
+        return await response.json()
+    }finally{
+        if(timeout) clearTimeout(timeout)
+    }
+}
+
+function tryPortraitLock(){
+    try{
+        if(screen.orientation&&screen.orientation.lock){
+            screen.orientation.lock("portrait").catch(()=>{})
+        }
+    }catch(e){}
+}
+
+tryPortraitLock()
 
 if(window.Telegram && Telegram.WebApp){
     Telegram.WebApp.ready()
@@ -2433,6 +3575,83 @@ function esc(v){
         .replaceAll(">","&gt;")
         .replaceAll('"',"&quot;")
         .replaceAll("'","&#039;")
+}
+
+function tapePrice(item){
+    if(!item || item.price===null || item.price===undefined || item.price==="") return "—"
+    const price=Number(item&&item.price)
+    if(!Number.isFinite(price)) return "—"
+    const digits=Number(item.digits)
+    const display=n(price,Number.isFinite(digits)?digits:2)
+    return item.key==="bist100" ? display : "₺"+display
+}
+
+function renderMarketTape(items){
+    const track=document.getElementById("tapeTrack")
+    if(!track || !Array.isArray(items) || !items.length) return
+
+    const content=items.map(item=>{
+        const change=Number(item.change)
+        const hasChange=Number.isFinite(change)
+        const className=hasChange
+            ? (change>0?"green":change<0?"red":"flat")
+            : "flat"
+        const changeText=hasChange
+            ? "%"+(change>0?"+":"")+n(change,2)
+            : "CANLI"
+        return `<div class="tapeItem">
+            <span class="tapeLabel">${esc(item.label)}</span>
+            <span class="tapePrice">${tapePrice(item)}</span>
+            <span class="tapeChange ${className}">${changeText}</span>
+        </div>`
+    }).join("")
+
+    track.innerHTML=`<div class="tapeSet">${content}</div><div class="tapeSet" aria-hidden="true">${content}</div>`
+    track.classList.remove("paused")
+}
+
+async function loadMarketTicker(){
+    try{
+        const data=await fetchJsonWithTimeout(
+            "/api/ticker?ts="+Date.now(),
+            {cache:"no-store"},
+            7500
+        )
+        renderMarketTape((data.data||{}).items||[])
+    }catch(e){
+        console.log("Piyasa bandı hatası",e)
+    }
+}
+
+function renderTerminalDashboard(){
+    const host=document.getElementById("terminalDashboard")
+    if(!host) return
+
+    const breadth=marketBreadth||{}
+    const lead=dailyBasket[0]
+    const status=breadth.status||"PİYASA TARANIYOR"
+    const ratio=Number(breadth.advance_decline_ratio)
+    const ratioText=Number.isFinite(ratio)?ratio.toLocaleString("tr-TR",{maximumFractionDigits:2}):"—"
+    const headline=lead
+        ? `${lead.symbol} günlük sepetin ilk sırasında`
+        : "Günlük teknik sepet hazırlanıyor"
+    const detail=lead
+        ? `${lead.label} • Teknik ${lead.technical_score}/100 • Rel. hacim ${n(lead.relative_volume,2)}x`
+        : "Trend, RSI, MACD ve hacim koşulları birlikte kontrol ediliyor."
+
+    host.innerHTML=`
+    <div class="dashboardHero">
+        <div class="dashEyebrow">${esc(status)}</div>
+        <div class="dashTitle">${esc(headline)}</div>
+        <div class="dashText">${esc(detail)}</div>
+        <button class="dashButton" onclick="openProTool('basket')">Günlük 5’li Sepeti Aç →</button>
+    </div>
+    <div class="breadthGrid">
+        <div class="breadthCard"><span>YÜKSELEN</span><b class="green">${breadth.rising??"—"}</b></div>
+        <div class="breadthCard"><span>DÜŞEN</span><b class="red">${breadth.falling??"—"}</b></div>
+        <div class="breadthCard"><span>Y/D ORANI</span><b>${ratioText}</b></div>
+        <div class="breadthCard"><span>KIRILIM</span><b>${breadth.breakouts??"—"}</b></div>
+    </div>`
 }
 
 
@@ -2521,8 +3740,11 @@ function kurObj(x){
 
 async function loadKurlar(){
     try{
-        const r=await fetch("/api/kurlar",{cache:"no-store"})
-        const j=await r.json()
+        const j=await fetchJsonWithTimeout(
+            "/api/kurlar",
+            {cache:"no-store"},
+            7500
+        )
         const d=j.data || {}
 
         function val(x,...keys){
@@ -2609,7 +3831,9 @@ function updateLiveStatus(){
         ? "Son başarılı BIST verisi"
         : "Canlı toplu tarama"
     const errorText=marketMeta.lastError
-        ? " • sağlayıcı yeniden deneniyor"
+        ? (marketMeta.lastError==="cached"
+            ? " • bağlantı kuruluyor"
+            : " • sağlayıcı yeniden deneniyor")
         : ""
 
     text.textContent=
@@ -2635,38 +3859,64 @@ function preparePriceMoves(stocks){
     lastPrices=nextPrices
 }
 
+function applyMarketUi(checkAlerts=true){
+    const total=document.getElementById("total")
+    const up=document.getElementById("up")
+    const strong=document.getElementById("strong")
+    const virmanCount=document.getElementById("virmanCount")
+
+    if(total) total.textContent=allStocks.length
+    if(up) up.textContent=allStocks.filter(x=>(x.change||0)>0).length
+    if(strong) strong.textContent=allStocks.filter(x=>x.score>=110).length
+    if(virmanCount){
+        virmanCount.textContent=allStocks.filter(
+            x=>x.institutional&&x.institutional.candidate
+        ).length
+    }
+
+    updateLiveStatus()
+    renderTerminalDashboard()
+    renderStocks()
+    if(checkAlerts) evaluateAlerts(allStocks)
+
+    const sheet=document.getElementById("toolSheet")
+    if(sheet && sheet.classList.contains("open") && proCurrentTool==="basket"){
+        renderProTool()
+    }
+}
+
 async function load(){
     if(marketLoading) return
     marketLoading=true
 
     try{
-        const r=await fetch("/api/market?ts="+Date.now(),{cache:"no-store"})
-        if(!r.ok) throw new Error("Piyasa isteği başarısız")
-
-        const j=await r.json()
+        const j=await fetchJsonWithTimeout(
+            "/api/market?ts="+Date.now(),
+            {cache:"no-store"},
+            9000
+        )
         const stocks=j.stocks || []
 
         preparePriceMoves(stocks)
         allStocks=stocks
+        dailyBasket=Array.isArray(j.daily_basket)?j.daily_basket:[]
+        marketBreadth=j.market_breadth||{}
+        telegramBasketEnabled=Boolean(j.telegram_daily_basket_enabled)
         marketMeta={
             updated:Number(j.updated)||0,
             refreshSeconds:Number(j.refresh_seconds)||10,
             lastError:j.last_error||null
         }
-
-        document.getElementById("total").textContent=allStocks.length
-
-        document.getElementById("up").textContent=
-            allStocks.filter(x=>(x.change||0)>0).length
-
-        document.getElementById("strong").textContent=
-            allStocks.filter(x=>x.score>=110).length
-
-        document.getElementById("virmanCount").textContent=
-            allStocks.filter(x=>x.institutional&&x.institutional.candidate).length
-
-        updateLiveStatus()
-        renderStocks()
+        saveLocal("bist_pro_last_market",{
+            stocks:allStocks,
+            dailyBasket,
+            marketBreadth,
+            telegramBasketEnabled,
+            updated:marketMeta.updated,
+            refreshSeconds:marketMeta.refreshSeconds,
+            cachedAt:Date.now()
+        })
+        applyMarketUi(true)
     }catch(e){
         marketMeta.lastError="connection"
         updateLiveStatus()
@@ -2687,6 +3937,7 @@ function showMoreStocks(){
 
 function setFilter(f,el){
     filter=f
+    marketDisplayLimit=150
 
     document.querySelectorAll(".tabs button")
         .forEach(b=>b.classList.remove("active"))
@@ -2721,6 +3972,24 @@ function renderStocks(){
     if(filter==="volume")
         arr.sort((a,b)=>(b.relative_volume||0)-(a.relative_volume||0))
 
+    if(filter==="breakout")
+        arr=arr
+            .filter(x=>x.technical&&x.technical.breakout)
+            .sort((a,b)=>(b.technical.score||0)-(a.technical.score||0))
+
+    if(filter==="momentum")
+        arr=arr
+            .filter(x=>x.technical&&x.technical.momentum)
+            .sort((a,b)=>(b.technical.score||0)-(a.technical.score||0))
+
+    if(filter==="pullback")
+        arr=arr
+            .filter(x=>x.technical&&x.technical.pullback)
+            .sort((a,b)=>(b.technical.score||0)-(a.technical.score||0))
+
+    if(filter==="favorites")
+        arr=arr.filter(x=>isFavorite(x.symbol))
+
     if(filter==="virman")
         arr=arr
             .filter(x=>x.institutional&&x.institutional.candidate)
@@ -2739,6 +4008,8 @@ function renderStocks(){
     if(!arr.length){
         list.innerHTML=filter==="virman"
             ? '<div class="warning">Şu anda belirlenen güçlü eşikleri geçen virman/kurumsal hareket adayı yok.</div>'
+            : filter==="favorites"
+                ? '<div class="warning">Henüz favori eklemedin. Hisse kartındaki yıldız düğmesine basarak liste oluşturabilirsin.</div>'
             : '<div class="loading">Hisse bulunamadı.</div>'
         return
     }
@@ -2747,8 +4018,10 @@ function renderStocks(){
 
         let cls=(s.change||0)>=0 ? "green":"red"
         const v=s.institutional||{}
+        const technical=s.technical||{}
         const vClass=(v.direction||"").includes("SATIŞ") ? "sell":"buy"
         const candidateClass=v.candidate ? " virmanCandidate":""
+        const favoriteClass=isFavorite(s.symbol)?" active":""
         const normalMetrics=`
             <div class="small"><span>RSI</span><b>${n(s.rsi,1)}</b></div>
             <div class="small"><span>Rel. Hacim</span><b>${n(s.relative_volume,2)}x</b></div>
@@ -2768,7 +4041,10 @@ function renderStocks(){
         <div class="stockTop">
 
         <div>
+        <div class="stockTitleLine">
         <div class="symbol">${s.symbol}</div>
+        <button class="favoriteButton${favoriteClass}" aria-label="Favoriye ekle" onclick='event.stopPropagation();toggleFavorite(${JSON.stringify(s.symbol)})'>${isFavorite(s.symbol)?"★":"☆"}</button>
+        </div>
         <div class="desc">${s.description||""}</div>
         </div>
 
@@ -2780,6 +4056,7 @@ function renderStocks(){
         </div>
 
         ${v.candidate ? `<div class="virmanTag ${vClass}">⚠ ${v.direction} • ${v.score}/100</div>` : ""}
+        ${technical.label&&technical.label!=="NÖTR İZLE" ? `<div class="stockSetup">${technical.label} • ${technical.score||0}/100</div>` : ""}
 
         <div class="smallgrid">
         ${filter==="virman" ? virmanMetrics : normalMetrics}
@@ -2794,6 +4071,495 @@ function renderStocks(){
         list.innerHTML+=
             `<button class="showMore" onclick="showMoreStocks()">${remaining} hisse daha göster</button>`
     }
+}
+
+function openProTool(tool){
+    proCurrentTool=tool
+    const titles={
+        basket:"Günlük Teknik Sepet",
+        portfolio:"Portföy & Maliyet",
+        alerts:"Akıllı Alarmlar",
+        risk:"Risk Hesaplayıcı"
+    }
+    document.getElementById("toolHeadTitle").textContent=titles[tool]||"Pro Araçlar"
+    const sheet=document.getElementById("toolSheet")
+    sheet.classList.add("open")
+    sheet.setAttribute("aria-hidden","false")
+    tryPortraitLock()
+    renderProTool()
+    window.scrollTo(0,0)
+}
+
+function closeProTool(){
+    const sheet=document.getElementById("toolSheet")
+    sheet.classList.remove("open")
+    sheet.setAttribute("aria-hidden","true")
+    portfolioEditingSymbol=""
+    portfolioDraft=null
+}
+
+function renderProTool(){
+    const panel=document.getElementById("toolPanel")
+    if(!panel) return
+    if(proCurrentTool==="basket") panel.innerHTML=renderBasketTool()
+    else if(proCurrentTool==="portfolio") panel.innerHTML=renderPortfolioTool()
+    else if(proCurrentTool==="alerts") panel.innerHTML=renderAlertsTool()
+    else if(proCurrentTool==="risk") panel.innerHTML=renderRiskTool()
+    else panel.innerHTML='<div class="warning">Araç bulunamadı.</div>'
+}
+
+function riskClass(level){
+    if(level==="YÜKSEK") return "red"
+    if(level==="ORTA") return "green"
+    return "green"
+}
+
+function renderBasketTool(){
+    const breadth=marketBreadth||{}
+    const basketRows=dailyBasket.map(item=>{
+        const reasons=(item.reasons||[]).map(reason=>`<li>${esc(reason)}</li>`).join("")
+        return `<div class="basketCard">
+            <div class="basketTop">
+                <div>
+                    <span class="basketRank">${item.rank||"—"}</span><span class="basketSymbol">${esc(item.symbol)}</span>
+                    <div class="basketName">${esc(item.description||"")}</div>
+                </div>
+                <div>
+                    <div class="basketPrice">₺${n(item.price)}</div>
+                    <div class="${Number(item.change)>=0?"green":"red"}" style="text-align:right">%${n(item.change)}</div>
+                </div>
+            </div>
+            <div class="basketMeta">
+                <b>${esc(item.label||"TEKNİK İZLE")}</b> • Teknik ${item.technical_score||0}/100 • Rel. Hacim ${n(item.relative_volume,2)}x • Risk <span class="${riskClass(item.risk_level)}">${esc(item.risk_level||"-")}</span>
+            </div>
+            ${reasons?`<ul class="basketReasons">${reasons}</ul>`:""}
+            <div class="levelGrid">
+                <div class="levelCell"><span>TAKİP BANDI</span><b>₺${n(item.watch_band_low)}–${n(item.watch_band_high)}</b></div>
+                <div class="levelCell"><span>RİSK SINIRI</span><b>₺${n(item.risk_stop)}</b></div>
+                <div class="levelCell"><span>İZLEME HEDEFİ</span><b>₺${n(item.watch_target_1)}</b></div>
+            </div>
+            <div class="sheetActions">
+                <button class="sheetButton secondary" onclick="openStockFromSheet('${esc(item.symbol)}')">Detayı Aç</button>
+                <button class="sheetButton" onclick="prefillPortfolio('${esc(item.symbol)}')">Portföye Ekle</button>
+            </div>
+        </div>`
+    }).join("")
+
+    return `
+        <div class="sheetHero">
+            <div class="dashEyebrow">OTOMATİK GÜNLÜK RADAR</div>
+            <h2>Günlük 5’li Teknik Sepet</h2>
+            <p>Trend, RSI, MACD, göreli hacim ve günlük fiyat hareketinin birlikte uyduğu hisseler sıralanır. Bu bir takip aracıdır; emir veya yatırım tavsiyesi değildir.</p>
+        </div>
+        <div class="breadthGrid" style="margin-top:10px">
+            <div class="breadthCard"><span>YÜKSELEN</span><b class="green">${breadth.rising??"—"}</b></div>
+            <div class="breadthCard"><span>DÜŞEN</span><b class="red">${breadth.falling??"—"}</b></div>
+            <div class="breadthCard"><span>MOMENTUM</span><b>${breadth.momentum??"—"}</b></div>
+            <div class="breadthCard"><span>HACİM+</span><b>${breadth.volume_bursts??"—"}</b></div>
+        </div>
+        <div class="toolSectionTitle">BUGÜNÜN TEKNİK İZLEME LİSTESİ</div>
+        ${basketRows||'<div class="warning">Şu an güçlü teknik eşikleri geçen sepet adayı bulunamadı. Piyasa yenilendikçe otomatik tekrar hesaplanır.</div>'}
+        <div class="warning" style="margin-top:12px">Takip bandı, risk sınırı ve hedef alanları algoritmik izleme seviyeleridir. Kendi riskine göre karar ver; kesin getiri veya al-sat önerisi değildir.</div>
+        <div class="toolSectionTitle">TELEGRAM RAPORU</div>
+        <div class="portfolioCard">${telegramBasketEnabled?'✅ Telegram günlük sepet raporu aktif. Her iş günü belirlenen saatte en fazla bir rapor gönderilir.':'ℹ️ Telegram günlük sepet raporu şu an kapalı. İstersen Render ortam değişkeninden ayrıca açılabilir.'}</div>
+    `
+}
+
+function openStockFromSheet(symbol){
+    closeProTool()
+    openDetail(String(symbol).toUpperCase())
+}
+
+function prefillPortfolio(symbol){
+    symbol=String(symbol||"").toUpperCase()
+    const stock=allStocks.find(item=>String(item.symbol).toUpperCase()===symbol)
+    const existing=portfolio.find(item=>String(item.symbol).toUpperCase()===symbol)
+    portfolioDraft=existing||{
+        symbol,
+        quantity:"",
+        cost:stock?stock.price:"",
+        target:"",
+        stop:""
+    }
+    portfolioEditingSymbol=symbol
+    proCurrentTool="portfolio"
+    document.getElementById("toolHeadTitle").textContent="Portföy & Maliyet"
+    renderProTool()
+}
+
+function currentStock(symbol){
+    const key=String(symbol||"").toUpperCase()
+    return allStocks.find(item=>String(item.symbol||"").toUpperCase()===key)||null
+}
+
+function positionMetrics(position){
+    const quantity=trNumber(position.quantity,0)
+    const cost=trNumber(position.cost,0)
+    const stock=currentStock(position.symbol)
+    const price=stock?trNumber(stock.price,null):null
+    const totalCost=quantity*cost
+    const currentValue=price===null?null:quantity*price
+    const pnl=currentValue===null?null:currentValue-totalCost
+    const pnlPct=totalCost>0&&pnl!==null?(pnl/totalCost)*100:null
+    return {quantity,cost,stock,price,totalCost,currentValue,pnl,pnlPct}
+}
+
+function renderPortfolioTool(){
+    const draft=portfolioDraft
+        || portfolio.find(item=>String(item.symbol).toUpperCase()===portfolioEditingSymbol)
+        || {symbol:"",quantity:"",cost:"",target:"",stop:""}
+    const rows=portfolio.map(position=>{
+        const data=positionMetrics(position)
+        const pnlClass=(data.pnl||0)>=0?"green":"red"
+        const priceText=data.price===null?"Veri yok":"₺"+n(data.price)
+        const pnlText=data.pnl===null?"—":`${data.pnl>=0?"+":""}${money(data.pnl)} (%${n(data.pnlPct)})`
+        return `<div class="portfolioItem">
+            <div class="portfolioRowTop">
+                <div>
+                    <div class="basketSymbol">${esc(position.symbol)}</div>
+                    <div class="portfolioInfo">${n(data.quantity,0)} lot • Maliyet ₺${n(data.cost)} • Son ${priceText}</div>
+                </div>
+                <div style="text-align:right">
+                    <b class="${pnlClass}">${pnlText}</b>
+                    <div class="portfolioInfo">${position.target?`Hedef ₺${n(position.target)}`:"Hedef yok"}${position.stop?` • Stop ₺${n(position.stop)}`:""}</div>
+                </div>
+            </div>
+            <div class="sheetActions">
+                <button class="iconTextButton" onclick="editPortfolio('${esc(position.symbol)}')">Düzenle</button>
+                <button class="iconTextButton danger" onclick="deletePortfolio('${esc(position.symbol)}')">Sil</button>
+            </div>
+        </div>`
+    }).join("")
+
+    const totals=portfolio.reduce((acc,position)=>{
+        const data=positionMetrics(position)
+        acc.cost+=data.totalCost
+        if(data.currentValue!==null) acc.value+=data.currentValue
+        return acc
+    },{cost:0,value:0})
+    const totalPnl=totals.value-totals.cost
+    const totalPnlPct=totals.cost>0?(totalPnl/totals.cost)*100:0
+
+    return `
+        <div class="sheetHero">
+            <div class="dashEyebrow">KİŞİSEL PORTFÖY</div>
+            <h2>Maliyet ve Anlık Kâr/Zarar</h2>
+            <p>Veriler yalnızca bu telefonun tarayıcısında saklanır. Hisse, lot, maliyet, hedef ve stop seviyeni istediğin zaman güncelleyebilirsin.</p>
+        </div>
+        <div class="portfolioTotals">
+            <div><span>TOPLAM MALİYET</span><b>${money(totals.cost)}</b></div>
+            <div><span>GÜNCEL DEĞER</span><b>${portfolio.length?money(totals.value):"—"}</b></div>
+            <div><span>KÂR / ZARAR</span><b class="${totalPnl>=0?"green":"red"}">${portfolio.length?`${totalPnl>=0?"+":""}${money(totalPnl)} (%${n(totalPnlPct)})`:"—"}</b></div>
+        </div>
+        <div class="toolSectionTitle">POZİSYON EKLE / GÜNCELLE</div>
+        <div class="portfolioCard">
+            <label class="formLabel">HİSSE KODU</label>
+            <input id="pSymbol" class="formInput" value="${esc(draft.symbol||"")}" placeholder="Örn. ASELS" autocapitalize="characters">
+            <div class="formGrid">
+                <div><label class="formLabel">LOT ADEDİ</label><input id="pQuantity" class="formInput" inputmode="decimal" value="${esc(draft.quantity??"")}" placeholder="Örn. 250"></div>
+                <div><label class="formLabel">ORT. MALİYET</label><input id="pCost" class="formInput" inputmode="decimal" value="${esc(draft.cost??"")}" placeholder="Örn. 36,42"></div>
+                <div><label class="formLabel">HEDEF FİYAT (ops.)</label><input id="pTarget" class="formInput" inputmode="decimal" value="${esc(draft.target??"")}" placeholder="Örn. 38,00"></div>
+                <div><label class="formLabel">STOP FİYAT (ops.)</label><input id="pStop" class="formInput" inputmode="decimal" value="${esc(draft.stop??"")}" placeholder="Örn. 35,40"></div>
+            </div>
+            <div class="sheetActions"><button class="sheetButton" onclick="savePortfolio()">${portfolioEditingSymbol?"Pozisyonu Güncelle":"Portföye Kaydet"}</button><button class="sheetButton secondary" onclick="clearPortfolioDraft()">Temizle</button></div>
+        </div>
+        <div class="toolSectionTitle">AÇIK POZİSYONLAR</div>
+        <div class="portfolioCard portfolioList">${rows||'<div class="warning">Henüz portföyüne hisse eklemedin. Yukarıdan maliyet ve lot girerek başlayabilirsin.</div>'}</div>
+    `
+}
+
+function clearPortfolioDraft(){
+    portfolioEditingSymbol=""
+    portfolioDraft=null
+    renderProTool()
+}
+
+function savePortfolio(){
+    const symbol=String(document.getElementById("pSymbol").value||"").trim().toUpperCase()
+    const quantity=trNumber(document.getElementById("pQuantity").value,0)
+    const cost=trNumber(document.getElementById("pCost").value,0)
+    const target=trNumber(document.getElementById("pTarget").value,0)
+    const stop=trNumber(document.getElementById("pStop").value,0)
+
+    if(!symbol || quantity<=0 || cost<=0){
+        showToast("Hisse kodu, lot ve maliyet alanlarını doğru doldur.")
+        return
+    }
+    if(!currentStock(symbol)){
+        showToast("Bu kod mevcut BIST listesinde bulunamadı. Hisse kodunu kontrol et.")
+        return
+    }
+
+    portfolio=portfolio.filter(item=>String(item.symbol).toUpperCase()!==symbol)
+    portfolio.push({
+        symbol,
+        quantity,
+        cost,
+        target:target>0?target:"",
+        stop:stop>0?stop:"",
+        updatedAt:Date.now()
+    })
+    portfolio.sort((a,b)=>String(a.symbol).localeCompare(String(b.symbol),"tr"))
+    saveLocal("bist_pro_portfolio",portfolio)
+    portfolioEditingSymbol=""
+    portfolioDraft=null
+    renderProTool()
+    showToast(symbol+" portföye kaydedildi.")
+}
+
+function editPortfolio(symbol){
+    const item=portfolio.find(position=>String(position.symbol).toUpperCase()===String(symbol).toUpperCase())
+    if(!item) return
+    portfolioEditingSymbol=String(symbol).toUpperCase()
+    portfolioDraft={...item}
+    renderProTool()
+}
+
+function deletePortfolio(symbol){
+    portfolio=portfolio.filter(position=>String(position.symbol).toUpperCase()!==String(symbol).toUpperCase())
+    saveLocal("bist_pro_portfolio",portfolio)
+    renderProTool()
+    showToast(String(symbol).toUpperCase()+" portföyden silindi.")
+}
+
+function renderRiskTool(){
+    const draft=loadLocal("bist_pro_risk_draft",{capital:"",riskPercent:"1",entry:"",stop:"",target:""})
+    return `
+        <div class="sheetHero">
+            <div class="dashEyebrow">POZİSYON BOYUTU</div>
+            <h2>Risk Hesaplayıcı</h2>
+            <p>Sermayenin ne kadarını riske edeceğini, giriş–stop farkına göre maksimum lotu ve hedefteki olası sonucu hesaplar.</p>
+        </div>
+        <div class="riskCard">
+            <div class="formGrid">
+                <div><label class="formLabel">SERMAYE (TL)</label><input id="rCapital" class="formInput" inputmode="decimal" value="${esc(draft.capital??"")}" placeholder="Örn. 30000"></div>
+                <div><label class="formLabel">RİSK %</label><input id="rRisk" class="formInput" inputmode="decimal" value="${esc(draft.riskPercent??"1")}" placeholder="Örn. 1"></div>
+                <div><label class="formLabel">GİRİŞ FİYATI</label><input id="rEntry" class="formInput" inputmode="decimal" value="${esc(draft.entry??"")}" placeholder="Örn. 36,42"></div>
+                <div><label class="formLabel">STOP FİYATI</label><input id="rStop" class="formInput" inputmode="decimal" value="${esc(draft.stop??"")}" placeholder="Örn. 35,40"></div>
+                <div class="wide"><label class="formLabel">HEDEF FİYAT</label><input id="rTarget" class="formInput" inputmode="decimal" value="${esc(draft.target??"")}" placeholder="Örn. 38,00"></div>
+            </div>
+            <div class="sheetActions"><button class="sheetButton" onclick="calculateRisk()">Hesapla</button><button class="sheetButton secondary" onclick="useSelectedForRisk()">Seçili Hisseyi Kullan</button></div>
+            <div id="riskResult" class="riskResult">Değerleri girip <b>Hesapla</b> düğmesine bas.</div>
+        </div>
+        <div class="warning">Bu hesap yalnızca matematiksel risk/ödül aracıdır. Komisyon, kayma, tavan–taban ve likidite riski içermez.</div>
+    `
+}
+
+function useSelectedForRisk(){
+    if(!selected){
+        showToast("Önce bir hissenin detayını aç veya giriş fiyatını kendin gir.")
+        return
+    }
+    document.getElementById("rEntry").value=selected.price??""
+    document.getElementById("rStop").value=Number(selected.price)*0.97
+    document.getElementById("rTarget").value=Number(selected.price)*1.03
+}
+
+function calculateRisk(){
+    const capital=trNumber(document.getElementById("rCapital").value,0)
+    const riskPercent=trNumber(document.getElementById("rRisk").value,0)
+    const entry=trNumber(document.getElementById("rEntry").value,0)
+    const stop=trNumber(document.getElementById("rStop").value,0)
+    const target=trNumber(document.getElementById("rTarget").value,0)
+    const result=document.getElementById("riskResult")
+    saveLocal("bist_pro_risk_draft",{capital,riskPercent,entry,stop,target})
+
+    if(capital<=0 || riskPercent<=0 || entry<=0 || stop<=0 || target<=0 || stop>=entry || target<=entry){
+        result.innerHTML='<span class="red">Sermaye ve fiyatları gir. Uzun pozisyon hesabında stop girişten düşük, hedef girişten yüksek olmalı.</span>'
+        return
+    }
+
+    const maxRisk=capital*(riskPercent/100)
+    const riskPerLot=entry-stop
+    const lotsByRisk=Math.floor(maxRisk/riskPerLot)
+    const lotsByCash=Math.floor(capital/entry)
+    const lots=Math.max(0,Math.min(lotsByRisk,lotsByCash))
+    const positionValue=lots*entry
+    const possibleLoss=lots*riskPerLot
+    const possibleProfit=lots*(target-entry)
+    const rr=possibleLoss>0?possibleProfit/possibleLoss:0
+
+    result.innerHTML=`<div class="riskResultGrid">
+        <div><span>MAKS. LOT</span><b>${n(lots,0)}</b></div>
+        <div><span>POZİSYON TUTARI</span><b>${money(positionValue)}</b></div>
+        <div><span>STOPTA RİSK</span><b class="red">${money(possibleLoss)}</b></div>
+        <div><span>HEDEFTE SONUÇ</span><b class="green">${money(possibleProfit)}</b></div>
+        <div><span>RİSK / ÖDÜL</span><b>1 : ${n(rr,2)}</b></div>
+        <div><span>SERMAYE KULLANIMI</span><b>%${n(capital?positionValue/capital*100:0,1)}</b></div>
+    </div>`
+}
+
+function alertTypeLabel(type){
+    const labels={
+        price_above:"Fiyat üstüne çıkınca",
+        price_below:"Fiyat altına inince",
+        change_above:"Günlük değişim % üstüne çıkınca",
+        relative_volume:"Göreli hacim x üstüne çıkınca"
+    }
+    return labels[type]||"Alarm"
+}
+
+function alertDescription(alert){
+    const symbol=alert.symbol==="ALL"?"TÜM BIST":alert.symbol
+    const suffix=alert.type==="relative_volume"?"x":alert.type==="change_above"?"%":" TL"
+    return `${symbol} • ${alertTypeLabel(alert.type)} ${n(alert.value,2)}${suffix}`
+}
+
+function renderAlertsTool(){
+    const rows=[...alerts].sort((a,b)=>(b.createdAt||0)-(a.createdAt||0)).map(alert=>{
+        const last=alert.lastTriggeredAt
+            ? new Date(alert.lastTriggeredAt).toLocaleString("tr-TR",{hour:"2-digit",minute:"2-digit",day:"2-digit",month:"2-digit"})
+            : "Henüz tetiklenmedi"
+        return `<div class="alertItem">
+            <div class="portfolioRowTop">
+                <div><b>${esc(alert.symbol==="ALL"?"TÜM BIST":alert.symbol)}</b><div class="alertDescription">${esc(alertDescription(alert))}</div></div>
+                <button class="iconTextButton danger" onclick="deleteAlert('${esc(alert.id)}')">Sil</button>
+            </div>
+            <div class="portfolioInfo">Son durum: ${esc(last)} • Aynı alarm 30 dakika beklemeden tekrar çalmaz.</div>
+        </div>`
+    }).join("")
+    const history=[...alertHistory].slice(0,3).map(item=>
+        `<div class="alertDescription">• ${esc(item.text)} <span style="color:#71839b">(${new Date(item.at).toLocaleTimeString("tr-TR",{hour:"2-digit",minute:"2-digit"})})</span></div>`
+    ).join("")
+
+    return `
+        <div class="sheetHero">
+            <div class="dashEyebrow">AÇIK SAYFA UYARILARI</div>
+            <h2>Akıllı Alarm Merkezi</h2>
+            <p>Fiyat, günlük değişim ve göreli hacim koşullarını kaydet. Uygulama açıkken her canlı yenilemede kontrol edilir; uygun olursa ekranda ve izin verirsen telefonda uyarı çıkar.</p>
+        </div>
+        <div class="alertCard">
+            <label class="formLabel">HİSSE KODU</label>
+            <input id="aSymbol" class="formInput" placeholder="Örn. ASELS veya TÜM BIST" autocapitalize="characters">
+            <div class="formGrid">
+                <div><label class="formLabel">KOŞUL</label>
+                    <select id="aType" class="formSelect">
+                        <option value="price_above">Fiyat üstüne çıkınca</option>
+                        <option value="price_below">Fiyat altına inince</option>
+                        <option value="change_above">Günlük değişim % üstü</option>
+                        <option value="relative_volume">Göreli hacim x üstü</option>
+                    </select>
+                </div>
+                <div><label class="formLabel">SEVİYE</label><input id="aValue" class="formInput" inputmode="decimal" placeholder="Örn. 1,50"></div>
+            </div>
+            <div class="sheetActions"><button class="sheetButton" onclick="saveAlert()">Alarmı Kaydet</button><button class="sheetButton secondary" onclick="requestBrowserNotifications()">Telefon Bildirimi</button></div>
+        </div>
+        <div class="warning">“TÜM BIST” seçeneğini sadece günlük değişim veya göreli hacim alarmında kullan. Tarayıcı/uygulama kapalıyken bu yerel alarmlar çalışmaz; sunucu tarafı Telegram günlük sepet raporu ayrı özelliktir.</div>
+        <div class="toolSectionTitle">KAYITLI ALARMLAR</div>
+        <div class="alertCard alertList">${rows||'<div class="portfolioInfo">Henüz alarm eklemedin.</div>'}</div>
+        <div class="toolSectionTitle">SON UYARILAR</div>
+        <div class="alertCard">${history||'<div class="portfolioInfo">Henüz tetiklenen alarm yok.</div>'}</div>
+    `
+}
+
+function saveAlert(){
+    let symbol=String(document.getElementById("aSymbol").value||"").trim().toUpperCase()
+    const type=document.getElementById("aType").value
+    const value=trNumber(document.getElementById("aValue").value,0)
+    if(["TÜM BIST","TUM BIST","ALL","*"].includes(symbol)) symbol="ALL"
+
+    if(!symbol || value<=0){
+        showToast("Hisse kodu ve alarm seviyesini gir.")
+        return
+    }
+    if(symbol==="ALL" && ["price_above","price_below"].includes(type)){
+        showToast("TÜM BIST için fiyat alarmı yerine yüzde veya hacim alarmını kullan.")
+        return
+    }
+    if(symbol!=="ALL" && !currentStock(symbol)){
+        showToast("Bu hisse kodu mevcut BIST listesinde bulunamadı.")
+        return
+    }
+
+    alerts.push({
+        id:"alert_"+Date.now()+"_"+Math.random().toString(16).slice(2),
+        symbol,
+        type,
+        value,
+        createdAt:Date.now(),
+        lastTriggeredAt:0
+    })
+    saveLocal("bist_pro_alerts",alerts)
+    renderProTool()
+    showToast("Alarm kaydedildi: "+alertDescription(alerts[alerts.length-1]))
+}
+
+function deleteAlert(id){
+    alerts=alerts.filter(alert=>alert.id!==id)
+    saveLocal("bist_pro_alerts",alerts)
+    renderProTool()
+}
+
+function beepAlert(){
+    try{
+        const Audio=window.AudioContext||window.webkitAudioContext
+        if(!Audio) return
+        const context=new Audio()
+        const oscillator=context.createOscillator()
+        const gain=context.createGain()
+        oscillator.connect(gain)
+        gain.connect(context.destination)
+        oscillator.frequency.value=880
+        gain.gain.setValueAtTime(.045,context.currentTime)
+        gain.gain.exponentialRampToValueAtTime(.001,context.currentTime+.28)
+        oscillator.start()
+        oscillator.stop(context.currentTime+.3)
+    }catch(e){}
+}
+
+function triggerAlert(alert,stock){
+    const price=stock?" • ₺"+n(stock.price):""
+    const text=`🔔 ${alertDescription(alert)}${stock?` (${stock.symbol}${price})`:""}`
+    alertHistory=[{text,at:Date.now()},...alertHistory].slice(0,25)
+    saveLocal("bist_pro_alert_history",alertHistory)
+    showToast(text)
+    beepAlert()
+
+    try{
+        if("Notification" in window && Notification.permission==="granted"){
+            new Notification("BIST Terminal Alarmı",{body:text})
+        }
+    }catch(e){}
+}
+
+function evaluateAlerts(stocks){
+    if(!alerts.length || !Array.isArray(stocks) || !stocks.length) return
+    const now=Date.now()
+    let changed=false
+
+    alerts.forEach(alert=>{
+        if(now-(alert.lastTriggeredAt||0)<30*60*1000) return
+        const candidates=alert.symbol==="ALL"
+            ? stocks
+            : stocks.filter(stock=>String(stock.symbol).toUpperCase()===alert.symbol)
+        const hit=candidates.find(stock=>{
+            const price=trNumber(stock.price,0)
+            const change=trNumber(stock.change,0)
+            const volume=trNumber(stock.relative_volume,0)
+            if(alert.type==="price_above") return price>=alert.value
+            if(alert.type==="price_below") return price>0&&price<=alert.value
+            if(alert.type==="change_above") return change>=alert.value
+            if(alert.type==="relative_volume") return volume>=alert.value
+            return false
+        })
+        if(hit){
+            alert.lastTriggeredAt=now
+            triggerAlert(alert,hit)
+            changed=true
+        }
+    })
+
+    if(changed) saveLocal("bist_pro_alerts",alerts)
+}
+
+function requestBrowserNotifications(){
+    if(!("Notification" in window)){
+        showToast("Bu tarayıcı bildirim iznini desteklemiyor.")
+        return
+    }
+    Notification.requestPermission().then(permission=>{
+        showToast(permission==="granted"?"Telefon bildirim izni açıldı.":"Bildirim izni verilmedi.")
+    }).catch(()=>showToast("Bildirim izni alınamadı."))
 }
 
 async function openDetail(symbol){
@@ -3749,6 +5515,10 @@ function detailTab(tab,el){
 
         let durum = s.signal || "-"
         let rsiText = "-"
+        const technical=s.technical||{}
+        const technicalReasons=(technical.reasons||[])
+            .map(reason=>`<li>${esc(reason)}</li>`)
+            .join("")
 
         if(s.rsi!==null){
             if(s.rsi>=70) rsiText="Aşırı güçlü / dikkat"
@@ -3813,6 +5583,19 @@ function detailTab(tab,el){
 
         </div>
         `
+
+        p.innerHTML+=`
+        <div class="card">
+        <h3>Pro Teknik Profil</h3>
+        <div class="rows">
+            <div class="row"><span>KURGU</span><b>${esc(technical.label||"NÖTR İZLE")}</b></div>
+            <div class="row"><span>PRO SKOR</span><b>${technical.score||0}/100</b></div>
+            <div class="row"><span>TREND</span><b>${esc(technical.trend||"-")}</b></div>
+            <div class="row"><span>RİSK</span><b class="${riskClass(technical.risk_level)}">${esc(technical.risk_level||"-")}</b></div>
+        </div>
+        ${technicalReasons?`<ul class="basketReasons">${technicalReasons}</ul>`:""}
+        <div class="sheetActions"><button class="sheetButton" onclick="prefillPortfolio('${esc(s.symbol)}')">Portföye Ekle</button><button class="sheetButton secondary" onclick="openProTool('risk')">Risk Hesabı</button></div>
+        </div>`
 
         return
     }
@@ -3896,13 +5679,18 @@ function detailTab(tab,el){
     if(tab==="chart"){
         p.innerHTML=`
         <div class="card">
-        <h3>Grafik</h3>
-        <div class="warning">
-        Gün içi mum grafik ve geçmiş fiyat serisi sonraki veri
-        kaynağı bağlantısıyla burada gösterilecek.
+        <h3>${s.symbol} • Canlı Grafik</h3>
+        <div style="height:430px;border-radius:12px;overflow:hidden;background:#0b111a">
+        <iframe
+          title="${s.symbol} TradingView grafiği"
+          src="https://s.tradingview.com/widgetembed/?symbol=BIST%3A${encodeURIComponent(s.symbol)}&interval=15&hidesidetoolbar=1&symboledit=0&saveimage=0&toolbarbg=f1f3f6&studies=[]&theme=dark&style=1&timezone=Europe%2FIstanbul&withdateranges=1&hide_top_toolbar=1&hide_legend=0&locale=tr"
+          style="width:100%;height:100%;border:0"
+          loading="lazy"></iframe>
         </div>
         </div>
+        <div class="warning">Grafik ücretsiz sağlayıcıdan yüklenir; seans dışı veya sağlayıcı gecikmesinde son güncellemeyi gösterebilir.</div>
         `
+        return
     }
 
     if(tab==="technical"){
@@ -4010,9 +5798,11 @@ function detailTab(tab,el){
 
 load()
 loadKurlar()
+loadMarketTicker()
 setInterval(load,10000)
+setInterval(loadMarketTicker,10000)
 setInterval(updateLiveStatus,1000)
-setInterval(loadKurlar, 1000)
+setInterval(loadKurlar,10000)
 
 </script>
 
@@ -4020,7 +5810,7 @@ setInterval(loadKurlar, 1000)
 <div class="mobileBottomNav" id="mobileBottomNav">
  <button class="active" onclick="bottomGo('all',this)"><b>⌂</b>Ana Sayfa</button>
  <button onclick="bottomGo('strong',this)"><b>⚡</b>Sinyaller</button>
- <button onclick="bottomGo('strong',this)"><b>★</b>Güçlü</button>
+ <button onclick="openProTool('basket')"><b>◈</b>Sepet</button>
  <button onclick="bottomGo('volume',this)"><b>▥</b>Hacim</button>
  <button onclick="bottomGo('virman',this)"><b>⇄</b>Virman</button>
 </div>
@@ -4116,7 +5906,12 @@ def api_health():
         "market_last_error": market_error,
         "akd_configured": bool(AKD_API_URL),
         "takas_configured": bool(TAKAS_API_URL),
-        "telegram_configured": bool(TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID)
+        "telegram_configured": bool(TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID),
+        "telegram_daily_basket_enabled": bool(
+            TELEGRAM_DAILY_BASKET_ENABLED
+            and TELEGRAM_BOT_TOKEN
+            and TELEGRAM_CHAT_ID
+        )
     })
 
 
@@ -4125,7 +5920,7 @@ if __name__ == "__main__":
 
     port = int(os.environ.get("PORT", 5000))
 
-    print("BIST VERİ TERMİNALİ V6.2 CANLI TARAMA AKTİF")
+    print("BIST VERİ TERMİNALİ V7.0 PRO+ CANLI TARAMA AKTİF")
     print("http://127.0.0.1:%s" % port)
 
     app.run(
