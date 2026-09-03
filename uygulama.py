@@ -1,4 +1,4 @@
-from flask import Flask, jsonify, make_response, render_template_string
+from flask import Flask, Response, jsonify, make_response, render_template_string
 import requests
 import threading
 import time
@@ -10,7 +10,7 @@ import string
 from datetime import datetime, timedelta, timezone
 
 app = Flask(__name__)
-APP_VERSION = "7.3-TURKIYE-SAATI-HIZLI-KONTROL"
+APP_VERSION = "7.4-BORSA-ISTANBUL-HIZLI-ACILIS"
 
 TV_URL = "https://scanner.tradingview.com/turkey/scan"
 
@@ -1916,12 +1916,13 @@ HTML = r'''
 <meta charset="utf-8">
 <meta name="viewport"
 content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<meta name="theme-color" content="#06111c">
 
 <title>BIST PRO Radar</title>
 
-<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<script defer src="https://telegram.org/js/telegram-web-app.js"></script>
 <!-- AKD ekran görüntüsünü telefonda, sunucuya göndermeden okumak için. -->
-<script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
 
 <style>
 *{
@@ -3730,11 +3731,177 @@ body{padding-bottom:106px!important;}
 .akdBotCard h3{margin:0 0 5px;color:#dff5ff;font-size:14px}.akdBotCard p{margin:0 0 9px;color:#9bb5c9;font-size:10px;line-height:1.45}.freeAkdButton{width:100%;min-height:39px;border:1px solid #3ba6d8;border-radius:11px;background:#0f6ca3;color:#f4fbff;font-size:11px;font-weight:900}.freeAkdHint{margin-top:7px;color:#83a2bc;font-size:8px;line-height:1.35}
 
 .mobileBottomNav{height:63px;padding:5px;grid-template-columns:repeat(6,1fr);gap:2px;border-radius:20px}.mobileBottomNav button{font-size:8px;border-radius:14px;padding:4px 1px}.mobileBottomNav button b{font-size:15px;line-height:17px;margin-bottom:2px}body{padding-bottom:91px!important}
+
+/* ===== V7.4 BORSA İSTANBUL AÇILIŞ EFEKTİ ===== */
+.openingSplash{
+    position:fixed;
+    inset:0;
+    z-index:30050;
+    display:grid;
+    place-items:center;
+    overflow:hidden;
+    background:
+        radial-gradient(circle at 72% 18%,rgba(17,157,176,.20),transparent 33%),
+        radial-gradient(circle at 24% 82%,rgba(23,88,167,.22),transparent 35%),
+        #050a11;
+    color:#eefaff;
+    opacity:1;
+    visibility:visible;
+    transition:opacity .36s ease,visibility .36s ease;
+}
+.openingSplash.isLeaving{opacity:0;visibility:hidden;pointer-events:none}
+.openingSplash::before{
+    content:"";
+    position:absolute;
+    inset:-30%;
+    opacity:.27;
+    background-image:
+        linear-gradient(rgba(92,194,220,.11) 1px,transparent 1px),
+        linear-gradient(90deg,rgba(92,194,220,.11) 1px,transparent 1px);
+    background-size:28px 28px;
+    transform:perspective(460px) rotateX(61deg) translateY(-22%);
+    transform-origin:center;
+    animation:splashGrid 2.7s linear infinite;
+}
+.openingSplash::after{
+    content:"";
+    position:absolute;
+    left:-18%;
+    right:-18%;
+    bottom:25%;
+    height:2px;
+    background:linear-gradient(90deg,transparent,rgba(61,231,207,.05),#38e3d0,rgba(61,231,207,.05),transparent);
+    box-shadow:0 0 20px rgba(43,238,211,.72),0 0 58px rgba(34,125,235,.37);
+    animation:splashSweep 1.5s ease-in-out infinite;
+}
+.openingSplashContent{
+    position:relative;
+    z-index:1;
+    width:min(330px,calc(100vw - 48px));
+    text-align:center;
+}
+.splashExchangePill{
+    display:inline-flex;
+    align-items:center;
+    gap:7px;
+    padding:7px 12px;
+    border:1px solid rgba(76,218,204,.40);
+    border-radius:999px;
+    background:rgba(8,33,43,.72);
+    color:#aef8ec;
+    font-size:10px;
+    font-weight:900;
+    letter-spacing:1.25px;
+}
+.splashExchangePill i{
+    width:7px;
+    height:7px;
+    border-radius:50%;
+    background:#37e4bd;
+    box-shadow:0 0 0 0 rgba(55,228,189,.60);
+    animation:splashPulse 1s ease-out infinite;
+}
+.splashChart{
+    position:relative;
+    height:116px;
+    margin:19px 0 10px;
+    border:1px solid rgba(83,142,183,.22);
+    border-radius:22px;
+    overflow:hidden;
+    background:linear-gradient(145deg,rgba(11,35,55,.90),rgba(6,14,25,.96));
+    box-shadow:inset 0 1px 0 rgba(196,239,255,.06),0 18px 45px rgba(0,0,0,.32);
+}
+.splashChartGrid{
+    position:absolute;
+    inset:0;
+    background-image:
+        linear-gradient(rgba(115,182,211,.09) 1px,transparent 1px),
+        linear-gradient(90deg,rgba(115,182,211,.09) 1px,transparent 1px);
+    background-size:29px 23px;
+}
+.splashBars{
+    position:absolute;
+    inset:18px 21px 17px;
+    display:flex;
+    align-items:flex-end;
+    justify-content:space-between;
+    gap:6px;
+}
+.splashBars b{
+    width:11px;
+    border-radius:5px 5px 2px 2px;
+    background:linear-gradient(180deg,#46dfd1,#156e91);
+    box-shadow:0 0 12px rgba(60,223,209,.22);
+    animation:splashBar 1.35s ease-in-out infinite alternate;
+}
+.splashBars b:nth-child(1){height:26%;animation-delay:-.9s}.splashBars b:nth-child(2){height:54%;animation-delay:-.45s}.splashBars b:nth-child(3){height:38%;animation-delay:-.75s}.splashBars b:nth-child(4){height:73%;animation-delay:-.12s}.splashBars b:nth-child(5){height:56%;animation-delay:-.55s}.splashBars b:nth-child(6){height:88%;animation-delay:-.23s}.splashBars b:nth-child(7){height:69%;animation-delay:-.82s}.splashBars b:nth-child(8){height:98%;animation-delay:-.38s}.splashBars b:nth-child(9){height:79%;animation-delay:-.65s}.splashBars b:nth-child(10){height:100%;animation-delay:-.06s}
+.splashLine{
+    position:absolute;
+    left:18px;
+    right:18px;
+    bottom:29px;
+    height:50px;
+    border-top:3px solid #81fff0;
+    border-radius:52% 48% 0 0 / 92% 88% 0 0;
+    transform:skewY(-8deg) rotate(-2deg);
+    filter:drop-shadow(0 0 7px rgba(72,244,222,.72));
+}
+.splashTitle{
+    color:#f4fbff;
+    font-size:28px;
+    font-weight:900;
+    letter-spacing:.25px;
+}
+.splashPro{
+    margin-top:4px;
+    color:#68e8d8;
+    font-size:10px;
+    font-weight:900;
+    letter-spacing:4px;
+}
+.splashProgress{
+    height:4px;
+    margin:22px auto 11px;
+    overflow:hidden;
+    border-radius:999px;
+    background:rgba(149,204,224,.17);
+}
+.splashProgress i{
+    display:block;
+    width:42%;
+    height:100%;
+    border-radius:inherit;
+    background:linear-gradient(90deg,#237be2,#49ead4);
+    box-shadow:0 0 12px rgba(67,224,211,.95);
+    animation:splashProgress 1.05s ease-in-out infinite;
+}
+.splashStatus{min-height:16px;color:#a0b7ca;font-size:11px;font-weight:700;letter-spacing:.1px}
+@keyframes splashGrid{from{background-position:0 0}to{background-position:0 56px}}
+@keyframes splashSweep{0%,100%{transform:translateX(-18%);opacity:.42}50%{transform:translateX(18%);opacity:1}}
+@keyframes splashPulse{to{box-shadow:0 0 0 9px rgba(55,228,189,0)}}
+@keyframes splashBar{from{filter:brightness(.85);transform:scaleY(.72)}to{filter:brightness(1.2);transform:scaleY(1)}}
+@keyframes splashProgress{0%{transform:translateX(-112%)}55%{transform:translateX(135%)}100%{transform:translateX(255%)}}
+@media (prefers-reduced-motion:reduce){.openingSplash::before,.openingSplash::after,.splashExchangePill i,.splashBars b,.splashProgress i{animation:none!important}}
 </style>
 
 </head>
 
 <body>
+
+<div id="openingSplash" class="openingSplash" role="status" aria-live="polite" aria-label="BIST Pro Radar açılıyor">
+<div class="openingSplashContent">
+<div class="splashExchangePill"><i></i>BORSA İSTANBUL • TÜRKİYE</div>
+<div class="splashChart" aria-hidden="true">
+<div class="splashChartGrid"></div>
+<div class="splashBars"><b></b><b></b><b></b><b></b><b></b><b></b><b></b><b></b><b></b><b></b></div>
+<div class="splashLine"></div>
+</div>
+<div class="splashTitle">BIST PRO RADAR</div>
+<div class="splashPro">PİYASA GÖRÜNÜMÜ</div>
+<div class="splashProgress"><i></i></div>
+<div id="splashStatus" class="splashStatus">Piyasa ekranı hazırlanıyor</div>
+</div>
+</div>
 
 <div class="app">
 
@@ -3993,6 +4160,42 @@ let alerts = (loadLocal("bist_pro_alerts",[])||[])
     .filter(x=>x&&x.id)
 let alertHistory = (loadLocal("bist_pro_alert_history",[])||[])
 const savedMarket=loadLocal("bist_pro_last_market",null)
+
+function startOpeningSplash(){
+    const splash=document.getElementById("openingSplash")
+    const status=document.getElementById("splashStatus")
+    if(!splash) return
+
+    const hasSavedMarket=Boolean(
+        savedMarket && Array.isArray(savedMarket.stocks) && savedMarket.stocks.length
+    )
+    if(status){
+        status.textContent=hasSavedMarket
+            ? "Son piyasa görünümü hazırlanıyor"
+            : "BIST piyasası hazırlanıyor"
+    }
+
+    const reduceMotion=Boolean(
+        window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches
+    )
+    const visibleFor=reduceMotion ? 380 : 1150
+
+    window.setTimeout(()=>{
+        splash.classList.add("isLeaving")
+        window.setTimeout(()=>splash.remove(),420)
+    },visibleFor)
+}
+
+function registerFastStart(){
+    if(!("serviceWorker" in navigator) || location.protocol!=="https:") return
+
+    window.addEventListener("load",()=>{
+        navigator.serviceWorker
+            .register("/sw.js?v=7.4",{scope:"/"})
+            .then(registration=>registration.update().catch(()=>{}))
+            .catch(()=>{})
+    })
+}
 
 if(savedMarket && Array.isArray(savedMarket.stocks) && savedMarket.stocks.length){
     allStocks=savedMarket.stocks
@@ -4303,10 +4506,14 @@ function tryPortraitLock(){
 
 tryPortraitLock()
 
-if(window.Telegram && Telegram.WebApp){
-    Telegram.WebApp.ready()
-    Telegram.WebApp.expand()
+function readyTelegramWebApp(){
+    if(window.Telegram && window.Telegram.WebApp){
+        window.Telegram.WebApp.ready()
+        window.Telegram.WebApp.expand()
+    }
 }
+
+document.addEventListener("DOMContentLoaded",readyTelegramWebApp,{once:true})
 
 function n(v,d=2){
     if(v===null || v===undefined) return "-"
@@ -6819,6 +7026,8 @@ function detailTab(tab,el){
     }
 }
 
+startOpeningSplash()
+registerFastStart()
 load()
 loadKurlar()
 loadMarketTicker()
@@ -6861,6 +7070,79 @@ function bottomOpen(tool,el){
 </body>
 </html>
 '''
+
+
+SERVICE_WORKER_JS = r'''
+const CACHE_PREFIX = "bist-pro-faststart-";
+const CACHE_NAME = "bist-pro-faststart-v7-4";
+const SHELL_URL = "/";
+const OFFLINE_SHELL = `<!doctype html><html lang="tr"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>BIST Pro Radar</title><body style="margin:0;display:grid;min-height:100vh;place-items:center;background:#050a11;color:#eaf8ff;font:700 16px Arial"><main style="padding:28px;text-align:center"><div style="color:#64e8d8;font-size:12px;letter-spacing:2px">BIST PRO RADAR</div><h1 style="margin:14px 0 8px;font-size:24px">Son ekran hazırlanıyor</h1><p style="margin:0;color:#9eb6c8;font-weight:400">Bağlantı kurulduğunda piyasa verisi yenilenecek.</p></main></body></html>`;
+
+async function isAppShell(response){
+  if(!response || !response.ok) return false;
+  try{
+    const html = await response.clone().text();
+    return html.includes("<title>BIST PRO Radar</title>");
+  }catch(error){
+    return false;
+  }
+}
+
+async function cacheAppShell(response){
+  if(!(await isAppShell(response))) return response;
+  const cache = await caches.open(CACHE_NAME);
+  await cache.put(SHELL_URL,response.clone());
+  return response;
+}
+
+self.addEventListener("install",event=>{
+  event.waitUntil(
+    fetch(SHELL_URL,{cache:"no-store"})
+      .then(cacheAppShell)
+      .catch(()=>null)
+      .then(()=>self.skipWaiting())
+  );
+});
+
+self.addEventListener("activate",event=>{
+  event.waitUntil(
+    caches.keys()
+      .then(keys=>Promise.all(
+        keys
+          .filter(key=>key.startsWith(CACHE_PREFIX) && key!==CACHE_NAME)
+          .map(key=>caches.delete(key))
+      ))
+      .then(()=>self.clients.claim())
+  );
+});
+
+self.addEventListener("fetch",event=>{
+  const request = event.request;
+  if(request.method!=="GET" || request.mode!=="navigate") return;
+
+  const revalidate = fetch(request)
+    .then(cacheAppShell)
+    .catch(()=>null);
+
+  event.waitUntil(revalidate);
+  event.respondWith((async()=>{
+    const cache = await caches.open(CACHE_NAME);
+    const cached = await cache.match(SHELL_URL);
+    if(cached) return cached;
+    return (await revalidate) || new Response(OFFLINE_SHELL,{
+      headers:{"Content-Type":"text/html; charset=utf-8"}
+    });
+  })());
+});
+'''
+
+
+@app.route("/sw.js")
+def service_worker():
+    response = Response(SERVICE_WORKER_JS, mimetype="application/javascript")
+    response.headers["Cache-Control"] = "no-store, max-age=0"
+    response.headers["Service-Worker-Allowed"] = "/"
+    return response
 
 
 @app.route("/api/live/<symbol>")
