@@ -10,7 +10,7 @@ import string
 from datetime import datetime, timedelta, timezone
 
 app = Flask(__name__)
-APP_VERSION = "7.1-MOBILE-RADAR"
+APP_VERSION = "7.2-PREMIUM-FREE-AKD"
 
 TV_URL = "https://scanner.tradingview.com/turkey/scan"
 
@@ -21,11 +21,12 @@ HEADERS = {
     "Referer": "https://www.tradingview.com/"
 }
 
-# Ücretsiz toplu piyasa kaynağı için güvenli en hızlı yenileme aralığı.
+# Ücretsiz toplu piyasa kaynağı için en sık yenileme aralığı.
 # Her hisse için ayrı ayrı bağlantı açmak yerine bütün BIST listesini tek
-# istekte yeniliyoruz. Böylece yaklaşık 650 hissenin tamamı aynı anda taranır.
+# istekte yeniliyoruz. Bu değer "Borsa eşanlı" veri iddiası değildir; ücretsiz
+# sağlayıcı aynı fiyatı veya gecikmeli güncellemeyi döndürebilir.
 MARKET_REFRESH_SECONDS = min(
-    60, max(10, int(os.getenv("MARKET_REFRESH_SECONDS", "10")))
+    60, max(3, int(os.getenv("MARKET_REFRESH_SECONDS", "3")))
 )
 MARKET_BACKGROUND_ENABLED = os.getenv(
     "MARKET_BACKGROUND_ENABLED", "1"
@@ -3606,6 +3607,54 @@ body{
 }
 .mobileBottomNav button.active b{color:#68f1df}
 body{padding-bottom:106px!important;}
+
+/* ===== V7.2 PREMIUM COMPACT TERMINAL ===== */
+/* Kullanıcı tercihiyle duraklatılan bant V7.1 kuralını ezebilsin. */
+.tapeTrack.userPaused{animation-play-state:paused!important}
+
+/* İlk açılışta hisse listesi yukarıda kalsın; ayrıntılı döviz kartları
+   piyasa bandında zaten özetleniyor. */
+#kurBar{display:none!important}
+.title.referenceTitle,.liveStatus{display:none!important}
+.top{padding:9px 14px 7px}
+.terminalControlBar{grid-template-columns:38px minmax(0,1fr) 38px;gap:7px}
+.terminalRoundButton{width:38px;height:38px;border-radius:12px;font-size:18px}
+.marketPill{height:35px;font-size:11px}
+.searchRow{margin-top:8px;grid-template-columns:minmax(0,1fr) 42px;gap:7px}
+.search{padding:11px 12px;border-radius:13px;font-size:13px}
+.searchToolButton{border-radius:13px;font-size:19px}
+.marketTape{margin:8px -14px -7px}
+.tapeItem{min-width:138px;padding:7px 10px}
+
+.terminalDashboard{padding:7px 14px 1px}
+.dashboardHero{padding:9px 10px;border-radius:14px;background:linear-gradient(125deg,#0c202d,#0a111a)}
+.premiumPulse{display:flex;align-items:center;justify-content:space-between;gap:9px}
+.pulseLead{min-width:0;display:grid;gap:2px}
+.pulseLead b{overflow:hidden;color:#edf7ff;font-size:13px;text-overflow:ellipsis;white-space:nowrap}
+.pulseLead small{overflow:hidden;color:#8ba0b7;font-size:9px;text-overflow:ellipsis;white-space:nowrap}
+.pulseTag{width:max-content;padding:2px 5px;border-radius:5px;background:rgba(42,196,179,.16);color:#66e7d4;font-size:8px;font-weight:900;letter-spacing:.4px}
+.pulseScore{display:grid;flex:0 0 48px;place-items:center;gap:1px;padding:6px 4px;border:1px solid #246c7d;border-radius:10px;background:#0a3140;color:#e7fbff}
+.pulseScore span{font-size:7px;font-weight:900;color:#84c5e1}.pulseScore b{font-size:15px}
+.radarModeRail{display:grid;grid-template-columns:repeat(3,1fr);gap:5px;margin-top:8px}
+.radarModeButton{min-height:28px;padding:4px;border:1px solid #20394a;border-radius:9px;background:#0c1722;color:#8fa3b8;font-size:9px;font-weight:900}
+.radarModeButton b{margin-right:3px;color:#72e6d8}.radarModeButton.active{border-color:#2dcec0;background:#0b5d60;color:#edffff}
+.dashEyebrow,.dashTitle,.dashText,.dashButton{display:none!important}
+.breadthGrid{gap:5px;margin-top:5px}.breadthCard{padding:6px 3px;border-radius:8px}.breadthCard span{font-size:7px}.breadthCard b{font-size:12px}
+
+.proQuickTools{padding:5px 14px 6px}.quickTool{min-height:31px;padding:6px 8px;border-radius:9px;font-size:9px}
+.quickTool b,.quickTool.featured b,.quickTool.orange b,.quickTool.greenTool b,.quickTool.pink b{font-size:11px}
+.watchlistHeader{padding:8px 2px 5px}.watchlistTitle{font-size:14px}.watchlistAction{padding:6px 7px;font-size:9px}
+.list{padding-bottom:6px}.stock{padding:9px 1px}.stockTop{grid-template-columns:39px minmax(0,1fr) max-content;gap:8px}
+.stockAvatar{width:38px;height:38px;border-radius:12px;font-size:9px}.symbol{font-size:15px}.desc{font-size:8px}.stockQuote{gap:3px;min-width:74px}.price{font-size:15px}.changeBadge{padding:3px 6px;font-size:9px}
+.stockMetaLine{margin:5px 0 0 47px;font-size:8px}.stockSetup{margin:5px 0 0 47px;font-size:8px}.stock .virmanTag{margin:5px 0 0 47px;padding:5px 6px;font-size:8px}
+
+.detailHeader{display:flex;align-items:center;justify-content:space-between;gap:8px}.detailHeaderActions{display:flex;gap:6px}.detailHeaderActions button{min-height:34px;padding:7px 9px;border:1px solid #294052;border-radius:10px;background:#111d2b;color:#dfeeff;font-size:10px;font-weight:900}.detailHeaderActions .detailFavorite{font-size:18px;padding:3px 10px;color:#ffd36d}
+.detailActionBar{display:grid;grid-template-columns:repeat(2,1fr);gap:7px;margin:10px 0}.detailActionBar button{min-height:38px;padding:8px;border:1px solid #25566d;border-radius:11px;background:#102131;color:#caedff;font-size:10px;font-weight:900}.detailActionBar button.primary{border-color:#23889a;background:#096575;color:#eaffff}
+.technicalProof{display:flex;flex-wrap:wrap;gap:6px;margin:10px 0}.technicalChip{padding:5px 7px;border:1px solid #253a4b;border-radius:999px;background:#0d1721;color:#9eb2c8;font-size:9px;font-weight:800}.technicalChip.good{border-color:#21745e;background:#0d302a;color:#73e0b3}.technicalChip.warn{border-color:#74551e;background:#30230e;color:#f6c969}
+.akdBotCard{margin:0 0 11px;padding:12px;border:1px solid #286790;border-radius:16px;background:linear-gradient(135deg,#092739,#11192a)}
+.akdBotCard h3{margin:0 0 5px;color:#dff5ff;font-size:14px}.akdBotCard p{margin:0 0 9px;color:#9bb5c9;font-size:10px;line-height:1.45}.freeAkdButton{width:100%;min-height:39px;border:1px solid #3ba6d8;border-radius:11px;background:#0f6ca3;color:#f4fbff;font-size:11px;font-weight:900}.freeAkdHint{margin-top:7px;color:#83a2bc;font-size:8px;line-height:1.35}
+
+.mobileBottomNav{height:63px;padding:5px;grid-template-columns:repeat(6,1fr);gap:2px;border-radius:20px}.mobileBottomNav button{font-size:8px;border-radius:14px;padding:4px 1px}.mobileBottomNav button b{font-size:15px;line-height:17px;margin-bottom:2px}body{padding-bottom:91px!important}
 </style>
 
 </head>
@@ -3627,7 +3676,7 @@ body{padding-bottom:106px!important;}
 </div>
 <button class="terminalRoundButton" onclick="openProTool('tools')" aria-label="Araçlar">☷</button>
 </div>
-<div class="title referenceTitle">BIST PRO RADAR <span>CANLI</span></div>
+<div class="title referenceTitle">BIST PRO RADAR <span>TARAMA</span></div>
 <div id="liveStatus" class="liveStatus">
 <span class="liveDot"></span>
 <span id="liveStatusText">Tüm BIST canlı taramaya hazırlanıyor...</span>
@@ -3639,7 +3688,7 @@ id="search"
 class="search"
 placeholder="🔎 Hisse ara: ASELS, THYAO, TUPRS..."
 oninput="renderStocks()">
-<button class="searchToolButton" onclick="openProTool('tools')" aria-label="Araçlar">⚙</button>
+<button class="searchToolButton" onclick="openProTool('settings')" aria-label="Ayarlar">⚙</button>
 </div>
 
 <div class="marketTape" aria-label="Canlı piyasa bandı">
@@ -3749,7 +3798,9 @@ oninput="renderStocks()">
 <button class="quickTool" onclick="applyQuickFilter('pullback')"><b>⌁</b>Toparlanma</button>
 <button class="quickTool pink" onclick="applyQuickFilter('volume')"><b>▥</b>Hacim Radar</button>
 <button class="quickTool" onclick="applyQuickFilter('favorites')"><b>★</b>Favoriler</button>
+<button class="quickTool pink" onclick="applyQuickFilter('virman')"><b>↔</b>Virman Radar</button>
 <button class="quickTool orange" onclick="openProTool('risk')"><b>◫</b>Risk Hesabı</button>
+<button class="quickTool" onclick="openProTool('settings')"><b>⚙</b>Ayarlar</button>
 </div>
 
 <div class="watchlistHeader">
@@ -3775,6 +3826,10 @@ oninput="renderStocks()">
 
 <div class="detailHeader">
 <button class="back" onclick="closeDetail()">← Geri</button>
+<div class="detailHeaderActions">
+<button id="detailFavoriteButton" class="detailFavorite" onclick="toggleFavoriteSelected()" aria-label="Favori">☆</button>
+<button onclick="shareSelectedStock()">↗ Paylaş</button>
+</div>
 </div>
 
 <div class="hero">
@@ -3793,6 +3848,7 @@ oninput="renderStocks()">
 <button onclick="detailTab('takas',this)">TAKAS</button>
 <button onclick="detailTab('virman',this)">VİRMAN</button>
 <button onclick="detailTab('signals',this)">SİNYALLER</button>
+<button onclick="detailTab('kap',this)">KAP</button>
 </div>
 
 <div id="panel" class="panel"></div>
@@ -3821,7 +3877,7 @@ let marketLoading = false
 let marketDisplayLimit = 150
 let lastPrices = new Map()
 let priceMoves = new Map()
-let marketMeta = {updated:0, refreshSeconds:10, lastError:null}
+let marketMeta = {updated:0, refreshSeconds:3, lastError:null}
 let dailyBasket = []
 let marketBreadth = {}
 let telegramBasketEnabled = false
@@ -3843,6 +3899,11 @@ function saveLocal(key,value){
     try{localStorage.setItem(key,JSON.stringify(value))}catch(e){}
 }
 
+const FREE_AKD_BOT_URL="https://t.me/ucretsizderinlikbot"
+const UI_REFRESH_MS=3000
+let radarMode=String(loadLocal("bist_pro_radar_mode","balanced")||"balanced")
+if(!["balanced","active","defensive"].includes(radarMode)) radarMode="balanced"
+
 let favorites = Array.from(new Set(
     (loadLocal("bist_pro_favorites",[])||[])
         .map(x=>String(x||"").trim().toUpperCase())
@@ -3862,7 +3923,7 @@ if(savedMarket && Array.isArray(savedMarket.stocks) && savedMarket.stocks.length
     telegramBasketEnabled=Boolean(savedMarket.telegramBasketEnabled)
     marketMeta={
         updated:Number(savedMarket.updated)||0,
-        refreshSeconds:Number(savedMarket.refreshSeconds)||10,
+        refreshSeconds:Number(savedMarket.refreshSeconds)||3,
         lastError:"cached"
     }
     setTimeout(()=>applyMarketUi(false),0)
@@ -3898,6 +3959,153 @@ function toggleFavorite(symbol){
     if(document.getElementById("toolSheet").classList.contains("open") && proCurrentTool==="portfolio"){
         renderProTool()
     }
+}
+
+function toggleFavoriteSelected(){
+    if(!selected){
+        showToast("Önce bir hissenin detayını aç.")
+        return
+    }
+    toggleFavorite(selected.symbol)
+    const button=document.getElementById("detailFavoriteButton")
+    if(button) button.textContent=isFavorite(selected.symbol)?"★":"☆"
+    showToast(selected.symbol+(isFavorite(selected.symbol)?" favorilere eklendi.":" favorilerden çıkarıldı."))
+}
+
+async function copyTextToClipboard(text){
+    const value=String(text||"").trim()
+    if(!value) return false
+    try{
+        if(navigator.clipboard && window.isSecureContext){
+            await navigator.clipboard.writeText(value)
+            return true
+        }
+    }catch(e){}
+    try{
+        const area=document.createElement("textarea")
+        area.value=value
+        area.style.position="fixed"
+        area.style.opacity="0"
+        document.body.appendChild(area)
+        area.select()
+        const ok=document.execCommand("copy")
+        area.remove()
+        return Boolean(ok)
+    }catch(e){
+        return false
+    }
+}
+
+async function shareSelectedStock(){
+    if(!selected){
+        showToast("Paylaşmak için önce bir hisse aç.")
+        return
+    }
+    const t=selected.technical||{}
+    const text=[
+        "BIST PRO RADAR",
+        `${selected.symbol} • ₺${n(selected.price)} • %${n(selected.change)}`,
+        `Teknik skor: ${selected.score||0}/150 • Rel. hacim: ${n(selected.relative_volume,2)}x`,
+        `Kurgu: ${t.label||"NÖTR İZLE"}`,
+        "Takip amaçlıdır; yatırım tavsiyesi değildir."
+    ].join("\n")
+    try{
+        if(navigator.share){
+            await navigator.share({title:`${selected.symbol} • BIST PRO RADAR`,text})
+            return
+        }
+    }catch(e){
+        if(e?.name==="AbortError") return
+    }
+    const copied=await copyTextToClipboard(text)
+    showToast(copied?"Hisse özeti kopyalandı.":"Paylaşım tarayıcıda desteklenmiyor.")
+}
+
+function openExternal(url){
+    const popup=window.open(url,"_blank")
+    if(popup){
+        try{popup.opener=null}catch(e){}
+        return
+    }
+    window.location.href=url
+}
+
+async function openFreeAkdBot(symbol){
+    const code=String(symbol||selected?.symbol||"").trim().toUpperCase()
+    // Popup engeline takılmaması için dış bağlantı kullanıcı tıklaması anında açılır.
+    openExternal(FREE_AKD_BOT_URL)
+    const copied=code ? await copyTextToClipboard(code) : false
+    const message=code
+        ? `${code} ${copied?"kopyalandı. Telegram botunda gönder.":"kodunu botta ara."}`
+        : "Telegram AKD botu açıldı. İstediğin hisse kodunu gönder."
+    showToast(message)
+}
+
+async function openKapSearch(symbol){
+    const code=String(symbol||selected?.symbol||"").trim().toUpperCase()
+    openExternal("https://kap.org.tr/tr/bildirim-sorgu")
+    const copied=code ? await copyTextToClipboard(code) : false
+    showToast(code
+        ? `${code} ${copied?"kopyalandı. KAP aramasına yapıştırabilirsin.":"kodunu KAP'ta ara."}`
+        : "KAP bildirim sorgusu açıldı.")
+}
+
+function openSpkBulletin(){
+    openExternal("https://spk.gov.tr/bultenler")
+    showToast("SPK bültenleri yeni sekmede açıldı.")
+}
+
+function openTefas(){
+    openExternal("https://www.tefas.gov.tr/")
+    showToast("TEFAS fon ekranı yeni sekmede açıldı.")
+}
+
+function openSelectedDetailTab(tab){
+    const labels={akd:"AKD",virman:"VİRMAN",kap:"KAP",signals:"SİNYALLER"}
+    const wanted=foldTr(labels[tab]||tab)
+    const button=[...document.querySelectorAll(".detailTabs button")]
+        .find(item=>foldTr(item.textContent).includes(wanted))
+    if(button) detailTab(tab,button)
+}
+
+function openAlertForSelected(){
+    const symbol=selected?.symbol||""
+    openProTool("alerts")
+    const input=document.getElementById("aSymbol")
+    if(input && symbol) input.value=symbol
+}
+
+function technicalProofHtml(stock){
+    const s=stock||{}
+    const t=s.technical||{}
+    const checks=[
+        [trNumber(s.price,0)>=trNumber(s.ema20,Infinity),"EMA20 üstü"],
+        [trNumber(s.price,0)>=trNumber(s.ema50,Infinity),"EMA50 üstü"],
+        [trNumber(s.rsi,0)>=52 && trNumber(s.rsi,0)<=70,"RSI dengeli"],
+        [trNumber(s.macd,0)>=trNumber(s.macd_signal,0),"MACD pozitif"],
+        [trNumber(s.relative_volume,0)>=1.5,"Hacim güçlü"]
+    ]
+    return `<div class="technicalProof">${checks.map(([ok,label])=>
+        `<span class="technicalChip ${ok?"good":"warn"}">${ok?"✓":"•"} ${label}</span>`
+    ).join("")}${t.breakout?'<span class="technicalChip good">↗ Kırılım</span>':''}</div>`
+}
+
+function radarModeDefinition(mode){
+    const items={
+        balanced:{title:"Dengeli",description:"Teknik skor ve hacme göre dengeli sıralama"},
+        active:{title:"Hızlı",description:"Momentum ve göreli hacmi öne çıkarır"},
+        defensive:{title:"Temkinli",description:"Daha düşük oynaklık ve trend uyumunu öne çıkarır"}
+    }
+    return items[mode]||items.balanced
+}
+
+function applyRadarMode(mode){
+    if(!["balanced","active","defensive"].includes(mode)) return
+    radarMode=mode
+    saveLocal("bist_pro_radar_mode",radarMode)
+    renderTerminalDashboard()
+    renderStocks()
+    showToast("Radar modu: "+radarModeDefinition(mode).title)
 }
 
 function applyQuickFilter(nextFilter){
@@ -4058,6 +4266,7 @@ function renderMarketTape(items){
 
     track.innerHTML=`<div class="tapeSet">${content}</div><div class="tapeSet" aria-hidden="true">${content}</div>`
     track.classList.remove("paused")
+    track.classList.toggle("userPaused",loadLocal("bist_pro_tape_running",true)===false)
 }
 
 async function loadMarketTicker(){
@@ -4079,29 +4288,38 @@ function renderTerminalDashboard(){
 
     const breadth=marketBreadth||{}
     const lead=dailyBasket[0]
+    const mode=radarModeDefinition(radarMode)
     const status=breadth.status||"PİYASA TARANIYOR"
     const ratio=Number(breadth.advance_decline_ratio)
     const ratioText=Number.isFinite(ratio)?ratio.toLocaleString("tr-TR",{maximumFractionDigits:2}):"—"
-    const headline=lead
-        ? `${lead.symbol} günlük sepetin ilk sırasında`
-        : "Günlük teknik sepet hazırlanıyor"
+    const headline=lead ? `${lead.symbol} • ${lead.label||"Teknik radar"}` : "Günlük teknik sepet hazırlanıyor"
     const detail=lead
-        ? `${lead.label} • Teknik ${lead.technical_score}/100 • Rel. hacim ${n(lead.relative_volume,2)}x`
-        : "Trend, RSI, MACD ve hacim koşulları birlikte kontrol ediliyor."
+        ? `Skor ${lead.technical_score||lead.score||"—"}/100 • Hacim ${n(lead.relative_volume,2)}x • ${marketUpdateTime()}`
+        : `Trend, RSI, MACD ve hacim kontrolü • ${marketUpdateTime()}`
 
     host.innerHTML=`
     <div class="dashboardHero">
-        <div class="dashEyebrow">${esc(status)}</div>
-        <div class="dashTitle">${esc(headline)}</div>
-        <div class="dashText">${esc(detail)}</div>
-        <button class="dashButton" onclick="openProTool('basket')">Günlük 5’li Sepeti Aç →</button>
+        <div class="premiumPulse">
+            <div class="pulseLead">
+                <span class="pulseTag">${marketMeta.refreshSeconds||3} SN TARAMA • ${esc(status)}</span>
+                <b>${esc(headline)}</b>
+                <small>${esc(detail)}</small>
+            </div>
+            <button class="pulseScore" onclick="openProTool('basket')" aria-label="Günlük sepeti aç"><span>SEPET</span><b>${dailyBasket.length||"—"}</b></button>
+        </div>
+        <div class="radarModeRail" aria-label="Radar modu">
+            <button class="radarModeButton ${radarMode==='active'?'active':''}" onclick="applyRadarMode('active')"><b>⚡</b>Hızlı</button>
+            <button class="radarModeButton ${radarMode==='balanced'?'active':''}" onclick="applyRadarMode('balanced')"><b>◈</b>Dengeli</button>
+            <button class="radarModeButton ${radarMode==='defensive'?'active':''}" onclick="applyRadarMode('defensive')"><b>◌</b>Temkinli</button>
+        </div>
     </div>
     <div class="breadthGrid">
         <div class="breadthCard"><span>YÜKSELEN</span><b class="green">${breadth.rising??"—"}</b></div>
         <div class="breadthCard"><span>DÜŞEN</span><b class="red">${breadth.falling??"—"}</b></div>
         <div class="breadthCard"><span>Y/D ORANI</span><b>${ratioText}</b></div>
         <div class="breadthCard"><span>KIRILIM</span><b>${breadth.breakouts??"—"}</b></div>
-    </div>`
+    </div>
+    <div class="dashEyebrow" aria-hidden="true">${esc(mode.title)}</div>`
 }
 
 
@@ -4438,6 +4656,25 @@ function updateListHeader(total){
     if(count) count.textContent=Number(total||0).toLocaleString("tr-TR")
 }
 
+function radarRowScore(stock){
+    const technical=stock.technical||{}
+    const technicalScore=trNumber(technical.score,0)
+    const mainScore=trNumber(stock.score,0)
+    const relativeVolume=Math.min(8,Math.max(0,trNumber(stock.relative_volume,0)))
+    const positiveChange=Math.max(0,trNumber(stock.change,0))
+    const trend=String(technical.trend||"").toUpperCase()
+    const balanced=mainScore+(technicalScore*.32)+(relativeVolume*6)+(technical.breakout?10:0)+(technical.momentum?8:0)
+    if(radarMode==="active"){
+        return balanced+(relativeVolume*5)+(positiveChange*5)+(technical.pullback?4:0)
+    }
+    if(radarMode==="defensive"){
+        const risk=String(technical.risk_level||"").toUpperCase()
+        const steady=Math.abs(trNumber(stock.change,0))<3 ? 8 : 0
+        return balanced+(risk.includes("DENGELİ")?22:risk.includes("ORTA")?10:0)+(trend.includes("YUKARI")?12:0)+steady
+    }
+    return balanced
+}
+
 function renderStocks(){
     let q=document.getElementById("search").value
         .trim()
@@ -4486,6 +4723,12 @@ function renderStocks(){
         arr=arr
             .filter(x=>x.institutional&&x.institutional.candidate)
             .sort((a,b)=>(b.institutional.score||0)-(a.institutional.score||0))
+
+    // Varsayılan piyasa ekranını seçilen radar moduna göre sırala. Bu sıralama
+    // sadece teknik/hacim önceliğidir; alım-satım önerisi değildir.
+    if(!q && ["all","strong","up"].includes(filter)){
+        arr.sort((a,b)=>radarRowScore(b)-radarRowScore(a))
+    }
 
     const totalMatched=arr.length
     updateListHeader(totalMatched)
@@ -4563,7 +4806,8 @@ function openProTool(tool){
         portfolio:"Portföy & Maliyet",
         alerts:"Akıllı Alarmlar",
         risk:"Risk Hesaplayıcı",
-        tools:"Komuta Merkezi"
+        tools:"Komuta Merkezi",
+        settings:"Ayarlar Merkezi"
     }
     document.getElementById("toolHeadTitle").textContent=titles[tool]||"Pro Araçlar"
     const sheet=document.getElementById("toolSheet")
@@ -4590,6 +4834,7 @@ function renderProTool(){
     else if(proCurrentTool==="alerts") panel.innerHTML=renderAlertsTool()
     else if(proCurrentTool==="risk") panel.innerHTML=renderRiskTool()
     else if(proCurrentTool==="tools") panel.innerHTML=renderToolsTool()
+    else if(proCurrentTool==="settings") panel.innerHTML=renderSettingsTool()
     else panel.innerHTML='<div class="warning">Araç bulunamadı.</div>'
 }
 
@@ -4602,9 +4847,14 @@ function renderToolsTool(){
         ["↗","Kırılım Radar","Hacimli teknik kırılım adayları","closeProTool();applyQuickFilter('breakout')",""],
         ["⚡","Momentum","Güçlü teknik momentum filtresi","closeProTool();applyQuickFilter('momentum')",""],
         ["⌁","Toparlanma","EMA20 çevresi toparlanma adayları","closeProTool();applyQuickFilter('pullback')",""],
-        ["▥","Kurumsal Radar","Olası kurumsal hareket adayları","closeProTool();applyQuickFilter('virman')","pinkCard"],
+        ["↔","Virman Radar","Kurumsal hareket adayı taraması","closeProTool();applyQuickFilter('virman')","pinkCard"],
+        ["◉","Ücretsiz AKD","Telegram veri terminalini açar","openFreeAkdBot(selected?.symbol||'')","akdBotCardCommand"],
+        ["K","KAP Radar","Bildirim, bilanço ve hak kullanımı araması","openKapSearch(selected?.symbol||'')","goldCard"],
+        ["S","SPK Bülteni","Halka arz ve kurul bültenleri","openSpkBulletin()","warningCard"],
+        ["F","Fon / TEFAS","Fon ekranını yeni sekmede açar","openTefas()",""],
         ["★","Favorilerim","Kendi seçtiğin hisseler","closeProTool();applyQuickFilter('favorites')",""],
-        ["◉","Hacim Radar","Göreli hacme göre sıralama","closeProTool();applyQuickFilter('volume')",""]
+        ["▥","Hacim Radar","Göreli hacme göre sıralama","closeProTool();applyQuickFilter('volume')",""],
+        ["⚙","Ayarlar","Görünüm, radar ve veri kontrolleri","openProTool('settings')","goldCard"]
     ]
 
     const cardsHtml=cards.map(([icon,title,description,action,extra])=>`
@@ -4621,8 +4871,56 @@ function renderToolsTool(){
             <p>Tarama, teknik sepet, alarm, portföy ve kurumsal radar ekranlarını buradan açabilirsin.</p>
         </div>
         <div class="commandGrid">${cardsHtml}</div>
-        <div class="warning" style="margin-top:12px">Kurumsal radar ve teknik sepet, halka açık fiyat/hacim verisinden kural tabanlı üretilir. Gerçek AKD veya kesin virman kaydı değildir.</div>
+        <div class="warning" style="margin-top:12px">Virman radarı ve teknik sepet, açık fiyat/hacim verisinden kural tabanlı üretilir. Ücretsiz AKD düğmesi üçüncü taraf Telegram botunu açar; gerçek AKD veya kesin virman kaydı olarak uygulama içinde üretilmez.</div>
     `
+}
+
+function renderSettingsTool(){
+    const mode=radarModeDefinition(radarMode)
+    const tickerOn=!document.getElementById("tapeTrack")?.classList.contains("userPaused")
+    const updated=marketMeta.updated ? marketUpdateTime() : "Henüz veri yok"
+    const sourceStatus=marketMeta.lastError
+        ? "Son başarılı veri ekranda tutuluyor"
+        : "Tarama bağlantısı açık"
+    return `
+        <div class="sheetHero">
+            <div class="dashEyebrow">BIST PRO RADAR</div>
+            <h2>Ayarlar Merkezi</h2>
+            <p>Görünümü ve tarama önceliğini buradan değiştir. Ayarlar yalnızca bu telefonda saklanır.</p>
+        </div>
+        <div class="toolSectionTitle">RADAR MODU</div>
+        <div class="portfolioCard">
+            <div class="radarModeRail" style="margin-top:0">
+                <button class="radarModeButton ${radarMode==='active'?'active':''}" onclick="applyRadarMode('active');renderProTool()"><b>⚡</b>Hızlı</button>
+                <button class="radarModeButton ${radarMode==='balanced'?'active':''}" onclick="applyRadarMode('balanced');renderProTool()"><b>◈</b>Dengeli</button>
+                <button class="radarModeButton ${radarMode==='defensive'?'active':''}" onclick="applyRadarMode('defensive');renderProTool()"><b>◌</b>Temkinli</button>
+            </div>
+            <div class="portfolioInfo">Şu an: <b>${esc(mode.title)}</b> • ${esc(mode.description)}</div>
+        </div>
+        <div class="toolSectionTitle">CANLI GÖRÜNÜM</div>
+        <div class="portfolioCard">
+            <div class="rows">
+                <div class="row"><span>TARAMA ARALIĞI</span><b>${marketMeta.refreshSeconds||3} sn</b><div class="desc">Ücretsiz toplu kaynak yenilemesi</div></div>
+                <div class="row"><span>SON VERİ</span><b>${esc(updated)}</b><div class="desc">${esc(sourceStatus)}</div></div>
+                <div class="row"><span>PIYASA BANDI</span><b>${tickerOn?'AÇIK':'DURAKLATILDI'}</b><div class="desc">Üstteki kayan fiyat bandı</div></div>
+            </div>
+            <div class="sheetActions"><button class="sheetButton" onclick="toggleTickerMotion()">${tickerOn?'Bandı Durdur':'Bandı Başlat'}</button><button class="sheetButton secondary" onclick="refreshHome()">Şimdi Yenile</button></div>
+        </div>
+        <div class="toolSectionTitle">HIZLI BAĞLANTILAR</div>
+        <div class="portfolioCard">
+            <div class="sheetActions"><button class="sheetButton" onclick="openFreeAkdBot(selected?.symbol||'')">Ücretsiz AKD Botu</button><button class="sheetButton secondary" onclick="openProTool('alerts')">Bildirimler</button></div>
+        </div>
+        <div class="warning">Tarama aralığı sıklaştırılmıştır; ücretsiz sağlayıcı eşanlı borsa lisansı değildir. Sağlayıcı aynı fiyatı veya gecikmeli güncellemeyi döndürebilir.</div>
+    `
+}
+
+function toggleTickerMotion(){
+    const track=document.getElementById("tapeTrack")
+    if(!track) return
+    track.classList.toggle("userPaused")
+    saveLocal("bist_pro_tape_running",!track.classList.contains("userPaused"))
+    renderProTool()
+    showToast(track.classList.contains("userPaused")?"Piyasa bandı duraklatıldı.":"Piyasa bandı başlatıldı.")
 }
 
 function riskClass(level){
@@ -5080,32 +5378,31 @@ function requestBrowserNotifications(){
 }
 
 async function openDetail(symbol){
+    try{
+        const r=await fetch("/api/stock/"+encodeURIComponent(symbol),{cache:"no-store"})
+        const j=await r.json()
+        if(!j.ok || !j.stock) throw new Error("Hisse ayrıntısı bulunamadı")
 
-    const r=await fetch("/api/stock/"+symbol)
-    const j=await r.json()
+        selected=j.stock
+        document.getElementById("home").style.display="none"
+        document.getElementById("detail").style.display="block"
 
-    if(!j.ok) return
+        document.getElementById("dSymbol").textContent=selected.symbol
+        document.getElementById("dName").textContent=selected.description||""
+        document.getElementById("dPrice").textContent="₺"+n(selected.price)
 
-    selected=j.stock
+        const ch=document.getElementById("dChange")
+        ch.textContent="%"+n(selected.change)
+        ch.className=(selected.change||0)>=0?"green":"red"
 
-    document.getElementById("home").style.display="none"
-    document.getElementById("detail").style.display="block"
+        const favoriteButton=document.getElementById("detailFavoriteButton")
+        if(favoriteButton) favoriteButton.textContent=isFavorite(selected.symbol)?"★":"☆"
 
-    document.getElementById("dSymbol").textContent=selected.symbol
-    document.getElementById("dName").textContent=selected.description||""
-    document.getElementById("dPrice").textContent="₺"+n(selected.price)
-
-    const ch=document.getElementById("dChange")
-    ch.textContent="%"+n(selected.change)
-
-    ch.className=(selected.change||0)>=0?"green":"red"
-
-    detailTab(
-        "summary",
-        document.querySelector(".detailTabs button")
-    )
-
-    window.scrollTo(0,0)
+        detailTab("summary",document.querySelector(".detailTabs button"))
+        window.scrollTo(0,0)
+    }catch(error){
+        showToast("Hisse ayrıntısı açılamadı. Bağlantıyı kontrol edip tekrar dene.")
+    }
 }
 
 
@@ -5614,6 +5911,17 @@ function extractManualAkdRows(ocrData){
     return normalizeManualRows(rows)
 }
 
+function freeAkdBotHtml(symbol){
+    const code=String(symbol||selected?.symbol||"").toUpperCase()
+    return `
+    <div class="akdBotCard">
+        <h3>✈ Ücretsiz AKD Kısayolu</h3>
+        <p>${esc(code||"Hisse")} kodunu kopyalar ve Telegram'daki üçüncü taraf veri botunu açar. Botta kodu göndererek kendi ekranından kontrol edebilirsin.</p>
+        <button class="freeAkdButton" onclick="openFreeAkdBot('${esc(code)}')">AKD'Yİ TELEGRAM'DA AÇ</button>
+        <div class="freeAkdHint">Botun resmî API bağlantısı yoktur; uygulama AKD satırlarını otomatik çekmez veya gerçek AKD üretmez.</div>
+    </div>`
+}
+
 function manualAkdUploadHtml(symbol){
     const snapshot=getManualAkd(symbol)
     const previous=snapshot
@@ -5621,10 +5929,11 @@ function manualAkdUploadHtml(symbol){
         : ""
 
     return `
+    ${freeAkdBotHtml(symbol)}
     <div class="card akdImportCard">
         <h3>📷 AKD Fotoğraf Aktar — ${esc(symbol)}</h3>
         <div class="akdImportSteps">
-            Borsa Robotu’nda aynı hissenin <b>AKD</b> ekranını aç. Alıcılar ve Satıcılar görünürken ekran görüntüsünü seç.
+            Kullandığın kaynakta aynı hissenin <b>AKD</b> ekranını aç. Alıcılar ve Satıcılar görünürken ekran görüntüsünü seç.
             İlk okumada 15–30 saniye sürebilir; alttaki satırları kontrol edip gerekirse düzelt.
         </div>
         <label class="filePicker">
@@ -5662,6 +5971,7 @@ function manualAkdTableHtml(snapshot){
         : ''
 
     return `
+    ${freeAkdBotHtml(snapshot.symbol)}
     <div class="providerBadge manualBadge">● AKD FOTOĞRAF AKTAR • ${manualAkdTime(snapshot)}</div>
     <div class="marketStrip">
         <div><span>KURUM</span><b>${rows.length}</b></div>
@@ -5766,9 +6076,10 @@ function manualAkdVirmanHtml(symbol){
     const snapshot=getManualAkd(symbol)
     if(!snapshot){
         return `
+        ${freeAkdBotHtml(symbol)}
         <div class="card akdImportCard">
             <h3>📷 Gerçek AKD'yi Virman Radarına Kat</h3>
-            <div class="desc" style="line-height:1.6">Borsa Robotu'ndaki aynı hissenin AKD ekran görüntüsünü aktar. En güçlü alıcı ve satıcılar, hacim radarının yanında gösterilsin.</div>
+            <div class="desc" style="line-height:1.6">Kullandığın kaynaktaki aynı hissenin AKD ekran görüntüsünü aktar. En güçlü alıcı ve satıcılar, hacim radarının yanında gösterilsin.</div>
             <div class="akdActions" style="grid-template-columns:1fr;margin-top:12px">
                 <button class="actionButton" onclick="openManualAkdImport('${esc(symbol)}')">AKD FOTOĞRAF AKTAR</button>
             </div>
@@ -5786,6 +6097,7 @@ function manualAkdVirmanHtml(symbol){
     const alignmentClass=aligned ? "green" : "red"
 
     return `
+    ${freeAkdBotHtml(symbol)}
     <div class="card akdImportCard">
         <div class="providerBadge manualBadge">● YÜKLENEN AKD • ${manualAkdTime(snapshot)}</div>
         <h3>AKD + Virman Radar Kontrolü</h3>
@@ -6149,6 +6461,13 @@ function detailTab(tab,el){
 
         </div>
 
+        <div class="detailActionBar">
+            <button class="primary" onclick="openFreeAkdBot('${esc(s.symbol)}')">◉ AKD Botu</button>
+            <button onclick="openSelectedDetailTab('virman')">↔ Virman</button>
+            <button onclick="openAlertForSelected()">♧ Alarm Kur</button>
+            <button onclick="openKapSearch('${esc(s.symbol)}')">K KAP Ara</button>
+        </div>
+
         <div class="card">
         <h3>Piyasa Özeti</h3>
 
@@ -6185,6 +6504,7 @@ function detailTab(tab,el){
         </div>
 
         </div>
+        ${technicalProofHtml(s)}
         </div>
         `
     }
@@ -6279,12 +6599,17 @@ function detailTab(tab,el){
     if(tab==="kap"){
         p.innerHTML=`
         <div class="card">
-        <h3>KAP Haberleri</h3>
-        <div class="warning">
-        ${s.symbol} için güncel KAP bildirimleri bu bölüme bağlanacak.
+        <h3>KAP Radar • ${esc(s.symbol)}</h3>
+        <div class="rows">
+            <div class="row"><span>HIZLI ARAMA</span><b>${esc(s.symbol)}</b><div class="desc">Hisse kodu KAP araması için kopyalanır.</div></div>
+            <div class="row"><span>İZLENECEKLER</span><b>Finansal rapor</b><div class="desc">Özel durum, temettü, bedelli/bedelsiz ve genel kurul</div></div>
+            <div class="row"><span>KAYNAK</span><b>Resmî KAP</b><div class="desc">Bildirim sorgusu yeni sekmede açılır.</div></div>
         </div>
+        <div class="sheetActions"><button class="sheetButton" onclick="openKapSearch('${esc(s.symbol)}')">KAP'TA ARA</button><button class="sheetButton secondary" onclick="openSpkBulletin()">SPK BÜLTENİ</button></div>
         </div>
+        <div class="warning">KAP, bildirim ve finansal rapor kaynağıdır. Bu bölüm şirket haberini göstermeden önce resmî sorguyu açar; teyitsiz haber üretmez.</div>
         `
+        return
     }
 
     if(tab==="ai"){
@@ -6317,20 +6642,22 @@ load()
 loadKurlar()
 loadMarketTicker()
 updateTerminalClock()
-setInterval(load,10000)
-setInterval(loadMarketTicker,10000)
+setInterval(load,UI_REFRESH_MS)
+setInterval(loadMarketTicker,UI_REFRESH_MS)
 setInterval(updateLiveStatus,1000)
 setInterval(updateTerminalClock,1000)
-setInterval(loadKurlar,10000)
+setInterval(loadKurlar,UI_REFRESH_MS)
 
 </script>
 
 
 <div class="mobileBottomNav" id="mobileBottomNav">
- <button class="active" onclick="bottomGo('all',this)"><b>⌂</b>Ana Sayfa</button>
- <button onclick="bottomGo('virman',this)"><b>▥</b>Kurumsal</button>
+ <button class="active" onclick="bottomGo('all',this)"><b>⌂</b>Piyasa</button>
+ <button onclick="bottomGo('strong',this)"><b>◎</b>Radar</button>
+ <button onclick="bottomOpen('basket',this)"><b>◈</b>Sepet</button>
+ <button onclick="bottomGo('virman',this)"><b>↔</b>Virman</button>
  <button onclick="bottomOpen('portfolio',this)"><b>◴</b>Portföy</button>
- <button onclick="bottomOpen('tools',this)"><b>•••</b>Diğer</button>
+ <button onclick="bottomOpen('settings',this)"><b>⚙</b>Ayar</button>
 </div>
 
 <script>
@@ -6425,7 +6752,7 @@ if __name__ == "__main__":
 
     port = int(os.environ.get("PORT", 5000))
 
-    print("BIST PRO RADAR V7.1 CANLI TARAMA AKTİF")
+    print("BIST PRO RADAR V7.2 PREMIUM TARAMA AKTİF")
     print("http://127.0.0.1:%s" % port)
 
     app.run(
