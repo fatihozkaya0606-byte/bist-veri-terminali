@@ -24,7 +24,7 @@ public class MainActivity extends Activity {
     private Ring liveRing;
     private TextView liveGoal,livePercent,liveDistance,liveCalories,liveMinutes,liveLifetime;
     private ProgressBar liveProgress;
-    private TextView livePace,liveActivity;
+    private TextView livePace,liveActivity,liveStatus;
     private Bars liveBars;
     private boolean receiverRegistered=false;
     private final BroadcastReceiver stepReceiver=new BroadcastReceiver(){
@@ -73,13 +73,13 @@ public class MainActivity extends Activity {
     void render(){
         colors(); displayed=StepStore.steps(this,0);
         liveRing=null;liveGoal=null;livePercent=null;liveDistance=null;
-        liveCalories=null;liveMinutes=null;liveLifetime=null;livePace=null;liveActivity=null;liveProgress=null;liveBars=null;
+        liveCalories=null;liveMinutes=null;liveLifetime=null;livePace=null;liveActivity=null;liveStatus=null;liveProgress=null;liveBars=null;
         root=new LinearLayout(this);root.setOrientation(LinearLayout.VERTICAL);root.setBackgroundColor(bg);
         setContentView(root);
         LinearLayout head=line();head.setPadding(dp(22),dp(8),dp(22),dp(5));
         TextView logo=txt("ADIM+   ✦",23,true,MINT);
         head.addView(logo,new LinearLayout.LayoutParams(0,-2,1));
-        TextView ver=txt("●  TEST 1.2",11,true,muted);head.addView(ver);
+        TextView ver=txt("●  TEST 1.3",11,true,muted);head.addView(ver);
         root.addView(head);
         scroll=new ScrollView(this);scroll.setFillViewport(false);scroll.setVerticalScrollBarEnabled(false);
         content=new LinearLayout(this);content.setPadding(dp(16),dp(2),dp(16),dp(22));content.setOrientation(1);scroll.addView(content);
@@ -120,8 +120,8 @@ public class MainActivity extends Activity {
         SensorManager sm=(SensorManager)getSystemService(SENSOR_SERVICE);
         boolean has=sm.getDefaultSensor(Sensor.TYPE_STEP_COUNTER)!=null||sm.getDefaultSensor(Sensor.TYPE_STEP_DETECTOR)!=null;
         boolean perm=Build.VERSION.SDK_INT<29||checkSelfPermission(Manifest.permission.ACTIVITY_RECOGNITION)==PackageManager.PERMISSION_GRANTED;
-        TextView info=txt(!has?"⚠ Bu telefonda adım sensörü yok":!perm?"⚠ Hareket izni vermek için dokun":"●  CANLI TAKİP AKTİF  •  Fiziksel adım sensörü",12,true,has&&perm?MINT:0xFFFFB86B);
-        status.addView(info);
+        liveStatus=txt(!perm?"⚠ Hareket iznine dokun":"●  Sensör başlatılıyor...",12,true,has&&perm?MINT:0xFFFFB86B);
+        status.addView(liveStatus);
         status.setOnClickListener(v->beginTracking());
         LinearLayout row=line();add(content,row,10);
         liveDistance=stat(row,"MESAFE",km(StepStore.distanceKm(this,steps))+" km","↗",BLUE);
@@ -189,6 +189,15 @@ public class MainActivity extends Activity {
     }
     private void updateLivePanels(){
         if(page!=0||liveRing==null)return;
+        if(liveStatus!=null){
+            boolean permission=Build.VERSION.SDK_INT<29 || checkSelfPermission(Manifest.permission.ACTIVITY_RECOGNITION)==PackageManager.PERMISSION_GRANTED;
+            String label=!permission?"⚠ Hareket izni gerekli":
+                !StepService.isRunning?"⚠ Sensör servisi çalışmıyor • dokun":
+                !StepService.isSensorReady?"⚠ Adım algılayan sensör bulunamadı":
+                "●  CANLI TAKİP  •  "+StepService.sensorMode;
+            liveStatus.setText(label);
+            liveStatus.setTextColor(permission&&StepService.isSensorReady?MINT:0xFFFFB86B);
+        }
         int steps=StepStore.steps(this,0);
         int pace=StepStore.pace(this);
         if(livePace!=null)livePace.setText(pace+" adım/dk");
@@ -331,12 +340,12 @@ public class MainActivity extends Activity {
         sw.setOnCheckedChangeListener((button,isChecked)->{StepStore.prefs(this).edit().putBoolean("dark",isChecked).apply();dark=isChecked;render();});
         LinearLayout tips=box(16);add(content,tips,14);
         label(tips,"Nasıl ölçülüyor?","Verilerini doğru yorumla");
-        add(tips,txt("• Adımlar telefonunun fiziksel hareket sensöründen gelir.\n• Mesafe = adım sayısı × adım uzunluğu.\n• Kalori ve aktif dakika tahminidir.\n• GPS ve internet gerekmez.\n• Bildirim ve ana ekran aynı adımları okur.\n• Telefon sensörü birkaç saniye gecikmeli adım gönderebilir.\n• Bildirimde takip açıkken sensör kullanılmaya devam edilir.\n• Pili korumak için sürekli GPS kullanılmaz.",13,false,muted),12);
+        add(tips,txt("• Adımlar telefonunun fiziksel hareket sensöründen gelir.\n• Mesafe = adım sayısı × adım uzunluğu.\n• Kalori ve aktif dakika tahminidir.\n• GPS ve internet gerekmez.\n• Bildirim ve ana ekran aynı adımları okur.\n• Hareket sensörü yürürken hızlı tahmini sayım yapar; donanım sayacı geldiğinde sayılar birleştirilir.\n• Sensör gecikmesi telefonuna göre değişir; 1–2 saniye garanti edilemez.\n• Bildirimde takip açıkken sensör kullanılmaya devam edilir.\n• Pili korumak için sürekli GPS kullanılmaz.",13,false,muted),12);
         action(content,"HAREKET İZNİNİ KONTROL ET",()->beginTracking());
         action(content,"GEÇMİŞİ SIFIRLA",()->new AlertDialog.Builder(this).setTitle("Adım kayıtları silinsin mi?")
             .setMessage("Son 30 gün ve diğer tüm birikmiş adımlar bu cihazdan silinecek. Geri alınamaz.")
             .setNegativeButton("İptal",null).setPositiveButton("Sil",(dialog,which)->{StepStore.clearHistory(this);render();}).show());
-        add(content,txt("Adım+ • v1.2 Test  |  Çevrimdışı  |  Hesap gerekmez",11,false,muted),18);
+        add(content,txt("Adım+ • v1.3 Test  |  Çevrimdışı  |  Hesap gerekmez",11,false,muted),18);
     }
     void setting(LinearLayout parent,String title,String v,String key,int min,int max){
         LinearLayout row=line();row.setPadding(dp(8),dp(14),dp(8),dp(14));
@@ -373,8 +382,8 @@ public class MainActivity extends Activity {
     }
     void beginTracking(){
         SensorManager sm=(SensorManager)getSystemService(SENSOR_SERVICE);
-        if(sm.getDefaultSensor(Sensor.TYPE_STEP_COUNTER)==null&&sm.getDefaultSensor(Sensor.TYPE_STEP_DETECTOR)==null){
-            new AlertDialog.Builder(this).setTitle("Adım sensörü bulunamadı").setMessage("Bu telefon fiziksel adım sayma sensörünü desteklemiyor. Yanlış sonuç göstermemek için sahte sayım yapmıyoruz.").setPositiveButton("Tamam",null).show();return;
+        if(sm.getDefaultSensor(Sensor.TYPE_STEP_COUNTER)==null&&sm.getDefaultSensor(Sensor.TYPE_STEP_DETECTOR)==null&&sm.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)==null){
+            new AlertDialog.Builder(this).setTitle("Adım sensörü bulunamadı").setMessage("Telefonunda kullanılabilecek hareket sensörü bulunamadı. Sahte adım göstermeyeceğiz.").setPositiveButton("Tamam",null).show();return;
         }
         if(Build.VERSION.SDK_INT>=29&&checkSelfPermission(Manifest.permission.ACTIVITY_RECOGNITION)!=PackageManager.PERMISSION_GRANTED){
             requestPermissions(new String[]{Manifest.permission.ACTIVITY_RECOGNITION},101);return;
