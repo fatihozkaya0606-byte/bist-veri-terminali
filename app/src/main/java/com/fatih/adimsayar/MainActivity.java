@@ -21,6 +21,7 @@ public class MainActivity extends Activity {
     private boolean dark=true;
     private int bg,card,fg,muted,border,smallCard;
     private int page=0;
+    private NeonDashboard neonDashboard;
     private Ring liveRing;
     private TextView liveGoal,livePercent,liveDistance,liveCalories,liveMinutes,liveLifetime;
     private ProgressBar liveProgress;
@@ -49,6 +50,7 @@ public class MainActivity extends Activity {
         receiverRegistered=true;
         handler.removeCallbacks(tick);
         handler.post(tick);
+        if(neonDashboard!=null)neonDashboard.invalidate();
     }
     @Override protected void onPause(){
         handler.removeCallbacks(tick);
@@ -72,106 +74,50 @@ public class MainActivity extends Activity {
     void label(LinearLayout in,String heading,String caption){in.addView(txt(heading,17,true,fg));TextView t=txt(caption,12,false,muted);add(in,t,4);}
     void render(){
         colors(); displayed=StepStore.steps(this,0);
+        neonDashboard=null;
         liveRing=null;liveGoal=null;livePercent=null;liveDistance=null;
         liveCalories=null;liveMinutes=null;liveLifetime=null;livePace=null;liveActivity=null;liveStatus=null;liveDiagnostic=null;liveProgress=null;liveBars=null;
         root=new LinearLayout(this);root.setOrientation(LinearLayout.VERTICAL);root.setBackgroundColor(bg);
         setContentView(root);
-        LinearLayout head=line();head.setPadding(dp(22),dp(8),dp(22),dp(5));
-        TextView logo=txt("ADIM+   ✦",23,true,MINT);
+        LinearLayout head=line();head.setPadding(dp(18),dp(11),dp(18),dp(6));
+        TextView logo=txt("ADIM+   ✦",24,true,MINT);
         head.addView(logo,new LinearLayout.LayoutParams(0,-2,1));
-        TextView ver=txt("●  TEST 1.6",11,true,muted);head.addView(ver);
+        TextView ver=txt("●  TEST 2.0",11,true,0xFFB6D5F1);
+        ver.setPadding(dp(12),dp(7),dp(12),dp(7));
+        ver.setBackground(shape(0xFF0A2742,18,0xFF245E8D));head.addView(ver);
         root.addView(head);
         scroll=new ScrollView(this);scroll.setFillViewport(false);scroll.setVerticalScrollBarEnabled(false);
-        content=new LinearLayout(this);content.setPadding(dp(16),dp(2),dp(16),dp(22));content.setOrientation(1);scroll.addView(content);
+        content=new LinearLayout(this);content.setPadding(page==0?0:dp(16),0,page==0?0:dp(16),dp(9));content.setOrientation(1);scroll.addView(content);
         root.addView(scroll,new LinearLayout.LayoutParams(-1,0,1));
         if(page==0)today();else if(page==1)analysis();else if(page==2)history();else settings();
-        nav=line();nav.setPadding(dp(8),dp(5),dp(8),dp(7));nav.setBackground(shape(card,18,0));
-        String[] icons={"◉","▥","▤","⚙"};String[] titles={"Bugün","Analiz","Geçmiş","Ayarlar"};
+        nav=line();nav.setPadding(dp(7),dp(5),dp(7),dp(7));
+        nav.setBackground(new GradientDrawable(GradientDrawable.Orientation.TL_BR,new int[]{0xFF0B2840,0xFF0A1B2D}));
+        nav.setElevation(dp(8));
+        String[] icons={"⌂","▥","▤","⚙"};String[] titles={"Bugün","Analiz","Geçmiş","Ayarlar"};
         for(int i=0;i<4;i++){
             final int tab=i;LinearLayout cell=new LinearLayout(this);cell.setOrientation(1);cell.setGravity(Gravity.CENTER);
-            cell.setPadding(dp(2),dp(7),dp(2),dp(5));cell.setBackground(shape(i==page?(dark?0xFF234D52:0xFFDBF7F1):card,16,0));
-            TextView icon=txt(icons[i],21,true,i==page?MINT:muted);icon.setGravity(Gravity.CENTER);cell.addView(icon);
-            TextView title=txt(titles[i],11,i==page,i==page?fg:muted);title.setGravity(Gravity.CENTER);cell.addView(title);
-            nav.addView(cell,new LinearLayout.LayoutParams(0,dp(55),1));cell.setOnClickListener(v->{page=tab;render();});
+            cell.setPadding(dp(2),dp(7),dp(2),dp(5));cell.setBackground(shape(i==page?0xFF075A63:0xFF0B2136,17,i==page?0xFF12B9BA:0));
+            TextView icon=txt(icons[i],25,true,i==page?MINT:0xFF9CB6D0);icon.setGravity(Gravity.CENTER);cell.addView(icon);
+            TextView title=txt(titles[i],11,true,i==page?MINT:0xFF9CB6D0);title.setGravity(Gravity.CENTER);cell.addView(title);
+            nav.addView(cell,new LinearLayout.LayoutParams(0,dp(59),1));cell.setOnClickListener(v->{page=tab;render();});
         }
         root.addView(nav);
     }
     private void headline(String title,String subtitle){add(content,txt(title,24,true,fg),8);add(content,txt(subtitle,13,false,muted),5);}
     private void today(){
-        String date=new SimpleDateFormat("EEEE, d MMMM yyyy",TR).format(new Date());
-        headline("Bugünkü hareketin",date);
-        int steps=StepStore.steps(this,0),goal=StepStore.goal(this);
-        LinearLayout hero=box(15);
-        hero.setBackground(new GradientDrawable(GradientDrawable.Orientation.TL_BR,
-            new int[]{dark?0xFF19374B:0xFFE7FCF7,card}));
-        add(content,hero,12);
-        liveRing=new Ring(steps,goal);
-        hero.addView(liveRing,new LinearLayout.LayoutParams(-1,dp(188)));
-        liveGoal=txt("",13,true,MINT);liveGoal.setGravity(Gravity.CENTER);hero.addView(liveGoal);
-        livePercent=txt("",12,false,muted);livePercent.setGravity(Gravity.CENTER);add(hero,livePercent,6);
-        liveProgress=new ProgressBar(this,null,android.R.attr.progressBarStyleHorizontal);
-        liveProgress.setMax(Math.max(1,goal));
-        liveProgress.setProgressTintList(android.content.res.ColorStateList.valueOf(MINT));
-        liveProgress.setProgressBackgroundTintList(android.content.res.ColorStateList.valueOf(border));
-        add(hero,liveProgress,13);
-        LinearLayout status=line();status.setPadding(dp(13),dp(10),dp(13),dp(10));
-        status.setBackground(shape(dark?0xFF163B3F:0xFFDDF6EF,12,0));
-        add(content,status,11);
-        SensorManager sm=(SensorManager)getSystemService(SENSOR_SERVICE);
-        boolean has=sm.getDefaultSensor(Sensor.TYPE_STEP_COUNTER)!=null||sm.getDefaultSensor(Sensor.TYPE_STEP_DETECTOR)!=null;
-        boolean perm=Build.VERSION.SDK_INT<29||checkSelfPermission(Manifest.permission.ACTIVITY_RECOGNITION)==PackageManager.PERMISSION_GRANTED;
-        liveStatus=txt(!perm?"⚠ Hareket iznine dokun":"●  Sensör başlatılıyor...",12,true,has&&perm?MINT:0xFFFFB86B);
-        status.addView(liveStatus);
-        status.setOnClickListener(v->beginTracking());
-        liveDiagnostic=txt("Donanım sensörleri ve yürüyüş doğrulaması kontrol ediliyor...",11,false,muted);
-        add(content,liveDiagnostic,7);
-        LinearLayout row=line();add(content,row,10);
-        liveDistance=stat(row,"MESAFE",km(StepStore.distanceKm(this,steps))+" km","↗",BLUE);
-        liveCalories=stat(row,"KALORİ",fmt(StepStore.calories(this,steps))+" kcal","♨",MINT);
-        row=line();add(content,row,8);
-        liveMinutes=stat(row,"AKTİF SÜRE*","~"+fmt(StepStore.activeMinutes(steps))+" dk","◷",MINT);
-        liveLifetime=stat(row,"TOPLAM ADIM",fmt((int)Math.min(Integer.MAX_VALUE,StepStore.prefs(this).getLong("lifetime",0))),"⌁",BLUE);
-        LinearLayout tempoPanel=box(13);add(content,tempoPanel,10);
-        LinearLayout tempoLine=line();
-        LinearLayout tempoLeft=new LinearLayout(this);tempoLeft.setOrientation(1);
-        tempoLeft.addView(txt("YÜRÜYÜŞ TEMPOSU",12,true,muted));
-        livePace=txt("0 adım/dk",20,true,MINT);add(tempoLeft,livePace,6);
-        tempoLine.addView(tempoLeft,new LinearLayout.LayoutParams(0,-2,1));
-        LinearLayout tempoRight=new LinearLayout(this);tempoRight.setOrientation(1);
-        TextView paceLbl=txt("SON 5 DAKİKA",11,true,muted);paceLbl.setGravity(Gravity.RIGHT);tempoRight.addView(paceLbl);
-        liveActivity=txt("Sensör ölçümü",12,false,fg);liveActivity.setGravity(Gravity.RIGHT);add(tempoRight,liveActivity,8);
-        tempoLine.addView(tempoRight);tempoPanel.addView(tempoLine);
-        LinearLayout waterCard=box(14);add(content,waterCard,12);
-        LinearLayout wr=line();
-        LinearLayout wl=new LinearLayout(this);wl.setOrientation(1);
-        wl.addView(txt("SU TAKİBİ   💧",16,true,fg));
-        add(wl,txt(WaterText()+"  •  Hedef "+WellnessStore.waterTarget(this)+" ml",12,false,muted),5);
-        wr.addView(wl,new LinearLayout.LayoutParams(0,-2,1));
-        TextView minus=chip("−");TextView plus=chip("+");
-        wr.addView(minus);wr.addView(plus);waterCard.addView(wr);
-        minus.setOnClickListener(v->{WellnessStore.addWater(this,-250);rerenderStay();});
-        plus.setOnClickListener(v->{WellnessStore.addWater(this,250);rerenderStay();});
-        ProgressBar waterBar=new ProgressBar(this,null,android.R.attr.progressBarStyleHorizontal);
-        waterBar.setMax(WellnessStore.waterTarget(this));waterBar.setProgress(WellnessStore.water(this,0));
-        waterBar.setProgressTintList(android.content.res.ColorStateList.valueOf(BLUE));
-        waterBar.setProgressBackgroundTintList(android.content.res.ColorStateList.valueOf(border));
-        add(waterCard,waterBar,11);
-        LinearLayout quick=line();add(content,quick,10);
-        TextView weightBtn=tile("⚖  KİLO",String.format(TR,"%.1f kg",WellnessStore.currentWeight(this)));
-        TextView notesBtn=tile("✎  GÜNLÜK NOT",WellnessStore.note(this).isEmpty()?"Bir not ekle":"Not kayıtlı ✓");
-        LinearLayout.LayoutParams qp=new LinearLayout.LayoutParams(0,dp(78),1);qp.setMargins(0,0,dp(5),0);quick.addView(weightBtn,qp);
-        LinearLayout.LayoutParams qp2=new LinearLayout.LayoutParams(0,dp(78),1);qp2.setMargins(dp(5),0,0,0);quick.addView(notesBtn,qp2);
-        weightBtn.setOnClickListener(v->editWeight());
-        notesBtn.setOnClickListener(v->editNote());
-        LinearLayout chart=box(14);add(content,chart,12);
-        label(chart,"Saatlik hareket","Güncel saatlik adım dağılımı");
-        liveBars=new Bars(hourData(),24);
-        chart.addView(liveBars,new LinearLayout.LayoutParams(-1,dp(143)));
-        LinearLayout motivate=box(13);add(content,motivate,10);
-        motivate.addView(txt(steps>=goal?"✦  Günlük hedef tamamlandı!":steps>=goal/2?"✦  Yolu yarıladın, devam et!":"✦  Küçük adımlar büyük sonuçlar getirir",14,true,fg));
-        add(motivate,txt("Mesafe, kalori ve aktif süre tahminidir. Ölçümler telefonunda saklanır. Sensörün iletim hızı cihazına göre değişebilir.",11,false,muted),7);
-        action(content,"GÜNLÜK SONUCU PAYLAŞ",()->share());
-        updateLivePanels();
+        neonDashboard=new NeonDashboard(this);
+        content.addView(neonDashboard,new LinearLayout.LayoutParams(-1,-2));
+    }
+    public void openTab(int tab) {
+        if(tab<0||tab>3)return;
+        page=tab;render();
+    }
+    public void openHeartRate(){
+        try{
+            startActivity(new Intent(this,HeartRateActivity.class));
+        }catch(Exception e){
+            Toast.makeText(this,"Nabız ölçümü açılamadı: "+e.getMessage(),Toast.LENGTH_LONG).show();
+        }
     }
     private String WaterText(){return WellnessStore.water(this,0)+" ml";}
     private TextView chip(String symbol){
@@ -190,6 +136,7 @@ public class MainActivity extends Activity {
         render();if(scroll!=null)scroll.post(()->scroll.scrollTo(0,y));
     }
     private void updateLivePanels(){
+        if(page==0&&neonDashboard!=null){neonDashboard.invalidate();return;}
         if(page!=0||liveRing==null)return;
         if(liveStatus!=null){
             boolean permission=Build.VERSION.SDK_INT<29 || checkSelfPermission(Manifest.permission.ACTIVITY_RECOGNITION)==PackageManager.PERMISSION_GRANTED;
@@ -384,7 +331,7 @@ public class MainActivity extends Activity {
         action(content,"GEÇMİŞİ SIFIRLA",()->new AlertDialog.Builder(this).setTitle("Adım kayıtları silinsin mi?")
             .setMessage("Son 30 gün ve diğer tüm birikmiş adımlar bu cihazdan silinecek. Geri alınamaz.")
             .setNegativeButton("İptal",null).setPositiveButton("Sil",(dialog,which)->{StepStore.clearHistory(this);render();}).show());
-        add(content,txt("Adım+ • v1.6 Test  |  Çevrimdışı  |  Hesap gerekmez",11,false,muted),18);
+        add(content,txt("Adım+ • v2.0 Test  |  Çevrimdışı  |  Hesap gerekmez",11,false,muted),18);
     }
     void setting(LinearLayout parent,String title,String v,String key,int min,int max){
         LinearLayout row=line();row.setPadding(dp(8),dp(14),dp(8),dp(14));
