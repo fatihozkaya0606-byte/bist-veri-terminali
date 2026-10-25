@@ -82,7 +82,7 @@ public class MainActivity extends Activity {
         LinearLayout head=line();head.setPadding(dp(18),dp(11),dp(18),dp(6));
         TextView logo=txt("ADIM+   ✦",24,true,MINT);
         head.addView(logo,new LinearLayout.LayoutParams(0,-2,1));
-        TextView ver=txt("●  TEST 2.2",11,true,0xFFB6D5F1);
+        TextView ver=txt("●  TEST 2.3",11,true,0xFFB6D5F1);
         ver.setPadding(dp(12),dp(7),dp(12),dp(7));
         ver.setBackground(shape(0xFF0A2742,18,0xFF245E8D));head.addView(ver);
         root.addView(head);
@@ -293,22 +293,8 @@ public class MainActivity extends Activity {
         setting(b,"Adım uzunluğu",StepStore.stride(this)+" cm","stride",30,150);
         setting(b,"Günlük su hedefi",WellnessStore.waterTarget(this)+" ml","water_target",500,5000);
         LinearLayout accuracy=box(15);add(content,accuracy,12);
-                label(accuracy,"Donanım adım takibi","Gereksiz telefon hareketlerini saymayı azaltır");
-        add(accuracy,txt("Otomatik mod yalnızca Android'in donanımsal adım sayacı ve adım algılayıcısını kullanır. Veriler cihaz tarafından birkaç saniye gecikmeli gelebilir. Ana ekrandaki Yürüyüş Takibi düğmesiyle isteğe bağlı hızlı yürüyüş sayımını başlatıp durdurabilirsin.",12,false,muted),9);
-        action(content,StepService.isWalkingMode?"HIZLI YÜRÜYÜŞÜ DURDUR":"HIZLI YÜRÜYÜŞÜ BAŞLAT",()->toggleWalkMode());
-        final String[] sensitivityLevels={"Düşük (yanlış sayımı azalt)","Normal (önerilen)","Yüksek (yavaş yürüyüş)"};
-        int currentSensitivity=StepStore.prefs(this).getInt("sensitivity",1);
-        LinearLayout sensitivityRow=line();
-        sensitivityRow.setPadding(dp(8),dp(15),dp(8),dp(15));
-        sensitivityRow.addView(txt("Yürüyüş hassasiyeti",14,true,fg),new LinearLayout.LayoutParams(0,-2,1));
-        sensitivityRow.addView(txt(sensitivityLevels[Math.min(2,Math.max(0,currentSensitivity))]+"  ›",12,true,MINT));
-        b.addView(sensitivityRow);
-        sensitivityRow.setOnClickListener(v->new AlertDialog.Builder(this)
-            .setTitle("Yürüyüş hassasiyeti")
-            .setSingleChoiceItems(sensitivityLevels,currentSensitivity,(dialog,index)->{
-                StepStore.prefs(this).edit().putInt("sensitivity",index).apply();
-                dialog.dismiss();render();
-            }).setNegativeButton("Vazgeç",null).show());
+        label(accuracy,"İlk sürümün adım sayacı","Telefonun kendi adım sensörüne geri dönüldü");
+        add(accuracy,txt("İvmeölçer ve hızlı yürüyüş tahmini tamamen kaldırıldı. İlk test sürümündeki gibi önce donanım adım sayacı, o yoksa adım algılayıcı kullanılır. Telefonunun sensörü verileri birkaç saniye gecikmeli iletebilir.",12,false,muted),9);
         LinearLayout theme=box(15);add(content,theme,15);
         LinearLayout t=line();t.addView(txt("Koyu tema",16,true,fg),new LinearLayout.LayoutParams(0,-2,1));
         Switch sw=new Switch(this);sw.setChecked(dark);t.addView(sw);theme.addView(t);
@@ -316,15 +302,11 @@ public class MainActivity extends Activity {
         sw.setOnCheckedChangeListener((button,isChecked)->{StepStore.prefs(this).edit().putBoolean("dark",isChecked).apply();dark=isChecked;render();});
         LinearLayout tips=box(16);add(content,tips,14);
         label(tips,"Nasıl ölçülüyor?","Verilerini doğru yorumla");
-        add(tips,txt("• Adımlar telefonunun fiziksel hareket sensöründen gelir.\n• Mesafe = adım sayısı × adım uzunluğu.\n• Kalori ve aktif dakika tahminidir.\n• GPS ve internet gerekmez.\n• Bildirim ve ana ekran aynı adımları okur.\n• Adım sayacı ve adım algılayıcı önceliklidir.\n• Otomatik takipte yalnızca donanımsal adım olayları sayılır.\n• Hızlı yürüyüş ritmi yalnızca kullanıcı modunu açınca sayılır.\n• Hızlı yürüyüşte art arda 3 düzenli adım ritmi aranır.\n• Ayarlardan düşük, normal ve yüksek yürüyüş hassasiyeti seçilebilir.\n• Telefonun donanımına göre ilk sayım gecikebilir.\n• Bildirimde takip açıkken sensör kullanılmaya devam edilir.\n• Pili korumak için sürekli GPS kullanılmaz.",13,false,muted),12);
+        add(tips,txt("• Adımlar yalnızca donanım adım sayacı veya adım algılayıcıdan gelir.\\n• Telefonu sallamayı adım sayan ivmeölçer kullanılmaz.\\n• Mesafe ve kalori tahmindir.\\n• GPS ve internet gerekmez.\\n• Bildirim ve ana ekran aynı kayıttan beslenir.\\n• Sayım hızı telefonun sensörüne bağlıdır.",13,false,muted),12);
         LinearLayout diagnostic=box(15);add(content,diagnostic,14);
-        label(diagnostic,"Sensör tanılama","Donanım ve hareket sensöründen gerçek zamanlı veriler");
-        add(diagnostic,txt("Donanım sayaç olayı: "+StepService.counterEvents+
-            "  |  Donanım adım olayı: "+StepService.detectorEvents+
-            "\\nHareket ritmi tepesi: "+StepService.gaitPeaks+
-            "  |  Ritim: %"+StepService.confidence+
-            "\\nHareket ölçümü: "+StepService.motionSamples+
-            "  |  Son sinyal: "+String.format(TR,"%.2f",StepService.signalPeak)+
+        label(diagnostic,"Sensör durumu","İlk sürüm donanım adım takibi");
+        add(diagnostic,txt("Adım sayacı olayı: "+StepService.counterEvents+
+            "   •   Adım algılayıcı olayı: "+StepService.detectorEvents+
             "\\nDurum: "+StepService.lastSource,12,false,muted),10);
         action(content,"HAREKET İZNİNİ KONTROL ET",()->beginTracking());
         action(content,"BUGÜNÜN ADIMLARINI SIFIRLA",()->new AlertDialog.Builder(this)
@@ -335,7 +317,7 @@ public class MainActivity extends Activity {
         action(content,"GEÇMİŞİ SIFIRLA",()->new AlertDialog.Builder(this).setTitle("Adım kayıtları silinsin mi?")
             .setMessage("Son 30 gün ve diğer tüm birikmiş adımlar bu cihazdan silinecek. Geri alınamaz.")
             .setNegativeButton("İptal",null).setPositiveButton("Sil",(dialog,which)->{StepStore.clearHistory(this);render();}).show());
-        add(content,txt("Adım+ • v2.2 Test  |  Çevrimdışı  |  Hesap gerekmez",11,false,muted),18);
+        add(content,txt("Adım+ • v2.3 Test  |  Çevrimdışı  |  Hesap gerekmez",11,false,muted),18);
     }
     void setting(LinearLayout parent,String title,String v,String key,int min,int max){
         LinearLayout row=line();row.setPadding(dp(8),dp(14),dp(8),dp(14));
@@ -370,28 +352,10 @@ public class MainActivity extends Activity {
         String report="Bugün "+fmt(n)+" adım attım! 🚶\nMesafe: "+km(StepStore.distanceKm(this,n))+" km\nTahmini kalori: "+StepStore.calories(this,n)+" kcal\nAdım+ ile hareketlerimi takip ediyorum.";
         Intent i=new Intent(Intent.ACTION_SEND);i.setType("text/plain");i.putExtra(Intent.EXTRA_TEXT,report);startActivity(Intent.createChooser(i,"Günlük sonucu paylaş"));
     }
-    public void toggleWalkMode(){
-        if(Build.VERSION.SDK_INT>=29 &&
-            checkSelfPermission(Manifest.permission.ACTIVITY_RECOGNITION)!=PackageManager.PERMISSION_GRANTED){
-            beginTracking();return;
-        }
-        boolean next=!StepService.isWalkingMode;
-        Intent request=new Intent(this,StepService.class);
-        request.setAction(next?StepService.WALK_ON:StepService.WALK_OFF);
-        try{
-            startForegroundService(request);
-            Toast.makeText(this,next?
-                "Hızlı yürüyüş başladı. Bu mod hareket algılamayı kullanır; yürüyüş bitince durdur.":
-                "Hızlı yürüyüş durdu. Donanım adım sayımı devam ediyor.",Toast.LENGTH_LONG).show();
-            handler.postDelayed(()->{if(neonDashboard!=null)neonDashboard.invalidate();},350);
-        }catch(Exception e){
-            Toast.makeText(this,"Yürüyüş modu başlatılamadı.",Toast.LENGTH_LONG).show();
-        }
-    }
     void beginTracking(){
         SensorManager sm=(SensorManager)getSystemService(SENSOR_SERVICE);
-        if(sm.getDefaultSensor(Sensor.TYPE_STEP_COUNTER)==null&&sm.getDefaultSensor(Sensor.TYPE_STEP_DETECTOR)==null&&sm.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)==null){
-            new AlertDialog.Builder(this).setTitle("Adım sensörü bulunamadı").setMessage("Telefonunda adım sayacı/dedektör bulunamadı. Düzenli yürüyüş hareketini doğrulayan yedek sistem kullanılacak.").setPositiveButton("Tamam",null).show();return;
+        if(sm.getDefaultSensor(Sensor.TYPE_STEP_COUNTER)==null&&sm.getDefaultSensor(Sensor.TYPE_STEP_DETECTOR)==null){
+            new AlertDialog.Builder(this).setTitle("Adım sensörü bulunamadı").setMessage("Bu telefonda donanım adım sensörü bulunamadı. Yanlış hareket sayımı yapmamak için ivmeölçer kullanılmayacak.").setPositiveButton("Tamam",null).show();return;
         }
         if(Build.VERSION.SDK_INT>=29&&checkSelfPermission(Manifest.permission.ACTIVITY_RECOGNITION)!=PackageManager.PERMISSION_GRANTED){
             requestPermissions(new String[]{Manifest.permission.ACTIVITY_RECOGNITION},101);return;
