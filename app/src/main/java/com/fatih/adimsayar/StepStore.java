@@ -75,7 +75,8 @@ public final class StepStore {
             delta=Math.min(20000,(int)(raw-previous));
         // İlk okumada veya yeniden baslamada mevcut toplamı ekleme: cift sayimi engeller.
         p.edit().putLong("boot",boot).putFloat("raw",raw).apply();
-        // Değerler StepService tarafından iki kez sayılmadan uzlaştırılarak kaydedilir.
+        // Restore v1: the hardware counter directly records the newly observed steps.
+        if(delta>0)add(c,delta);
         return delta;
     }
     public static synchronized void clearToday(Context c){
