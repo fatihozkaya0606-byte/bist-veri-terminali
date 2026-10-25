@@ -32,9 +32,7 @@ public class StepService extends Service implements SensorEventListener {
 
     private final BroadcastReceiver screenReceiver=new BroadcastReceiver(){
         @Override public void onReceive(Context context,Intent intent){
-            if(Intent.ACTION_SCREEN_ON.equals(intent.getAction()))setAccelEnabled(true);
-            else if(Intent.ACTION_SCREEN_OFF.equals(intent.getAction()) && hasCounter)
-                setAccelEnabled(false);
+// Ekran acilip kapaninca olcum modu degismez.
         }
     };
 
@@ -60,17 +58,14 @@ public class StepService extends Service implements SensorEventListener {
             sessionDay=StepStore.day(0);
             counterSensor=sensorManager.getDefaultSensor(Sensor.TYPE_STEP_COUNTER);
             detectorSensor=sensorManager.getDefaultSensor(Sensor.TYPE_STEP_DETECTOR);
-            accelerationSensor=sensorManager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER);
+            // v1.4: ivmeolcer kullanilmiyor. Elde oynatma adim sayilmayacak.
             // Eski sürüm dedektörü tek kaynak olarak seçiyordu: bazı telefonlarda hiç olay gelmiyordu.
             // Önce donanım sayacı, ayrıca düşük gecikmeli hareket verisi kullanılır.
             if(counterSensor!=null)
                 hasCounter=sensorManager.registerListener(this,counterSensor,SensorManager.SENSOR_DELAY_FASTEST,0);
-            if(!hasCounter && detectorSensor!=null)
+            if(detectorSensor!=null)
                 hasDetector=sensorManager.registerListener(this,detectorSensor,SensorManager.SENSOR_DELAY_FASTEST,0);
-            PowerManager pm=(PowerManager)getSystemService(POWER_SERVICE);
-            boolean interactive=pm==null||pm.isInteractive();
-            if(accelerationSensor!=null && (interactive||!hasCounter))
-                setAccelEnabled(true);
+            // Yalniz donanim adim sayaci ve dedektorunu kaydet.
             try{
                 IntentFilter filter=new IntentFilter();
                 filter.addAction(Intent.ACTION_SCREEN_ON);
@@ -80,10 +75,10 @@ public class StepService extends Service implements SensorEventListener {
             }catch(Exception ex){
                 android.util.Log.w("AdimPlus","Ekran alıcısı kaydedilemedi",ex);
             }
-            isSensorReady=hasCounter||hasDetector||hasAccel;
-            sensorMode=hasCounter?"Donanım sayacı + hızlı hareket algılama":
-                       hasDetector?"Adım dedektörü + hareket algılama":
-                       hasAccel?"Hızlı hareket algılama":"Uyumlu sensör yok";
+            isSensorReady=hasCounter||hasDetector;
+            sensorMode=hasCounter&&hasDetector?"Donanım adım sayacı + algılayıcı":
+                       hasCounter?"Donanım adım sayacı":
+                       hasDetector?"Donanım adım algılayıcı":"Uyumlu adım sensörü yok";
             sendBroadcast(new Intent(UPDATE_ACTION).setPackage(getPackageName()));
         }
         return START_STICKY;
