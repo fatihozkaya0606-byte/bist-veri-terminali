@@ -72,9 +72,9 @@ public class StepService extends Service implements SensorEventListener {
             stepDetector=manager.getDefaultSensor(Sensor.TYPE_STEP_DETECTOR);
             accelerometer=manager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER);
             if(stepCounter!=null)
-                counterRegistered=manager.registerListener(this,stepCounter,SensorManager.SENSOR_DELAY_NORMAL,0);
+                counterRegistered=manager.registerListener(this,stepCounter,SensorManager.SENSOR_DELAY_FASTEST,0);
             if(stepDetector!=null)
-                detectorRegistered=manager.registerListener(this,stepDetector,SensorManager.SENSOR_DELAY_NORMAL,0);
+                detectorRegistered=manager.registerListener(this,stepDetector,SensorManager.SENSOR_DELAY_FASTEST,0);
             // Varsayilan: SADECE fiziksel adim sensorleri. Telefonu oynatmak adim degildir.
             // Ivmeolcer asla otomatik olarak sayim kaynagina kaydedilmez.
             isWalkingMode=false;
@@ -93,6 +93,12 @@ public class StepService extends Service implements SensorEventListener {
         if(enabled && accelerometer==null){
             lastSource="Bu telefonda hizli hareket sensoru yok";
             return;
+        }
+        if(enabled && !isWalkingMode) {
+            // Other sensors already counted the earlier steps; start fast mode from
+            // current published total instead of waiting to catch up from zero.
+            rhythmSteps=Math.max(rhythmSteps,sessionPublished);
+            candidateRun=0;lastInterval=0;
         }
         isWalkingMode=enabled;
         enableMotion(enabled);
@@ -166,8 +172,8 @@ public class StepService extends Service implements SensorEventListener {
         if(g<3f)return;
         float projected=((x-gx)*gx+(y-gy)*gy+(z-gz)*gz)/g;
         filteredVertical=filteredVertical*0.58f+projected*0.42f;
-        float threshold=StepStore.prefs(this).getInt("sensitivity",1)==2?0.43f:
-                        StepStore.prefs(this).getInt("sensitivity",1)==0?0.91f:0.62f;
+        float threshold=StepStore.prefs(this).getInt("sensitivity",1)==2?0.32f:
+                        StepStore.prefs(this).getInt("sensitivity",1)==0?0.88f:0.47f;
         long now=SystemClock.elapsedRealtime();
         if(lastPeak!=0 && now-lastPeak>1900L && candidateRun>0){
             candidateRun=0;confidence=0;lastInterval=0;
@@ -185,8 +191,8 @@ public class StepService extends Service implements SensorEventListener {
         signalPeak=oldVertical;
         gaitPeaks++;
         long interval=lastPeak==0?0:now-lastPeak;
-        if(interval>=285L&&interval<=1250L){
-            if(lastInterval==0||Math.abs((int)interval-lastInterval)<=400)
+        if(interval>=320L&&interval<=1170L){
+            if(lastInterval==0||Math.abs((int)interval-lastInterval)<=330)
                 candidateRun=Math.min(50,candidateRun+1);
             else
                 candidateRun=1;
@@ -196,11 +202,11 @@ public class StepService extends Service implements SensorEventListener {
             lastInterval=0;
         }
         lastPeak=now;
-        confidence=Math.min(100,candidateRun*25);
-        lastSource="Ritim denetimi "+Math.min(candidateRun,4)+"/4";
-        // 4 ardışık adım gelmeden ekrana adım yazılmaz.
-        if(candidateRun>=4){
-            rhythmSteps=Math.min(1000000,rhythmSteps+(candidateRun==4?4:1));
+        confidence=Math.min(100,candidateRun*33);
+        lastSource="Ritim denetimi "+Math.min(candidateRun,3)+"/3";
+        // Fast mode is OPT-IN, requiring three regular peaks rather than four.
+        if(candidateRun>=3){
+            rhythmSteps=Math.min(1000000,rhythmSteps+(candidateRun==3?3:1));
             lastSource="Düzenli yürüyüş algılandı";
             lastEventMs=now;
         }
