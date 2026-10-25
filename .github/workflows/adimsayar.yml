@@ -21,7 +21,7 @@ jobs:
           gradle-version: '8.9'
       - name: Build APK
         run: |
-          sdkmanager "platforms;android-35" "build-tools;35.0.0"
+          /usr/local/lib/android/sdk/cmdline-tools/16.0/bin/sdkmanager "platforms;android-35" "build-tools;35.0.0"
           gradle --no-daemon assembleDebug
       - name: Preserve APK as artifact
         uses: actions/upload-artifact@v4
