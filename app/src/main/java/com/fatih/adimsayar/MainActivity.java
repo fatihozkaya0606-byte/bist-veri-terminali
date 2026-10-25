@@ -178,7 +178,7 @@ public class MainActivity extends Activity {
         t.setLayoutParams(lp);t.setBackground(shape(smallCard,12,0));return t;
     }
     private TextView tile(String a,String b){
-        TextView t=txt(a+"\\n"+b,13,true,fg);
+        TextView t=txt(a+"\n"+b,13,true,fg);
         t.setGravity(Gravity.CENTER_VERTICAL);
         t.setPadding(dp(13),dp(9),dp(7),dp(9));
         t.setBackground(shape(card,17,border));return t;
@@ -306,12 +306,12 @@ public class MainActivity extends Activity {
         try(java.io.OutputStream output=getContentResolver().openOutputStream(data.getData())){
             if(output==null)throw new java.io.IOException("Dosya açılamadı");
             java.io.OutputStreamWriter writer=new java.io.OutputStreamWriter(output,"UTF-8");
-            writer.write("Tarih,Adım,Mesafe_km,Tahmini_Kalori_kcal,Su_ml\\n");
+            writer.write("Tarih,Adım,Mesafe_km,Tahmini_Kalori_kcal,Su_ml\n");
             for(int i=89;i>=0;i--){
                 int count=StepStore.steps(this,-i);
                 writer.write(StepStore.day(-i)+","+count+","+
                     String.format(Locale.US,"%.3f",StepStore.distanceKm(this,count))+","+
-                    StepStore.calories(this,count)+","+WellnessStore.water(this,-i)+"\\n");
+                    StepStore.calories(this,count)+","+WellnessStore.water(this,-i)+"\n");
             }
             writer.flush();Toast.makeText(this,"90 günlük rapor kaydedildi",Toast.LENGTH_LONG).show();
         }catch(Exception e){Toast.makeText(this,"Rapor kaydedilemedi: "+e.getMessage(),Toast.LENGTH_LONG).show();}
