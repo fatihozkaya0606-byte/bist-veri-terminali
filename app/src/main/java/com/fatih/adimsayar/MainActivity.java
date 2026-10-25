@@ -79,7 +79,7 @@ public class MainActivity extends Activity {
         LinearLayout head=line();head.setPadding(dp(22),dp(8),dp(22),dp(5));
         TextView logo=txt("ADIM+   ✦",23,true,MINT);
         head.addView(logo,new LinearLayout.LayoutParams(0,-2,1));
-        TextView ver=txt("●  TEST 1.5",11,true,muted);head.addView(ver);
+        TextView ver=txt("●  TEST 1.6",11,true,muted);head.addView(ver);
         root.addView(head);
         scroll=new ScrollView(this);scroll.setFillViewport(false);scroll.setVerticalScrollBarEnabled(false);
         content=new LinearLayout(this);content.setPadding(dp(16),dp(2),dp(16),dp(22));content.setOrientation(1);scroll.addView(content);
@@ -201,8 +201,9 @@ public class MainActivity extends Activity {
             liveStatus.setTextColor(permission&&StepService.isSensorReady?MINT:0xFFFFB86B);
         }
         if(liveDiagnostic!=null){
-            String line="Sensör verisi: sayaç "+StepService.counterEvents+
+            String line="Sensör: sayaç "+StepService.counterEvents+
                 " • algılayıcı "+StepService.detectorEvents+
+                " • hareket "+StepService.motionSamples+
                 " • ritim "+StepService.confidence+"%";
             if(StepService.counterEvents==0&&StepService.detectorEvents==0&&StepService.confidence==0)
                 line+="  |  Yürüyüş bekleniyor";
@@ -344,6 +345,19 @@ public class MainActivity extends Activity {
         setting(b,"Kilo",StepStore.weight(this)+" kg","weight",30,250);
         setting(b,"Adım uzunluğu",StepStore.stride(this)+" cm","stride",30,150);
         setting(b,"Günlük su hedefi",WellnessStore.waterTarget(this)+" ml","water_target",500,5000);
+        final String[] sensitivityLevels={"Düşük (yanlış sayımı azalt)","Normal (önerilen)","Yüksek (yavaş yürüyüş)"};
+        int currentSensitivity=StepStore.prefs(this).getInt("sensitivity",1);
+        LinearLayout sensitivityRow=line();
+        sensitivityRow.setPadding(dp(8),dp(15),dp(8),dp(15));
+        sensitivityRow.addView(txt("Yürüyüş hassasiyeti",14,true,fg),new LinearLayout.LayoutParams(0,-2,1));
+        sensitivityRow.addView(txt(sensitivityLevels[Math.min(2,Math.max(0,currentSensitivity))]+"  ›",12,true,MINT));
+        b.addView(sensitivityRow);
+        sensitivityRow.setOnClickListener(v->new AlertDialog.Builder(this)
+            .setTitle("Yürüyüş hassasiyeti")
+            .setSingleChoiceItems(sensitivityLevels,currentSensitivity,(dialog,index)->{
+                StepStore.prefs(this).edit().putInt("sensitivity",index).apply();
+                dialog.dismiss();render();
+            }).setNegativeButton("Vazgeç",null).show());
         LinearLayout theme=box(15);add(content,theme,15);
         LinearLayout t=line();t.addView(txt("Koyu tema",16,true,fg),new LinearLayout.LayoutParams(0,-2,1));
         Switch sw=new Switch(this);sw.setChecked(dark);t.addView(sw);theme.addView(t);
@@ -351,14 +365,16 @@ public class MainActivity extends Activity {
         sw.setOnCheckedChangeListener((button,isChecked)->{StepStore.prefs(this).edit().putBoolean("dark",isChecked).apply();dark=isChecked;render();});
         LinearLayout tips=box(16);add(content,tips,14);
         label(tips,"Nasıl ölçülüyor?","Verilerini doğru yorumla");
-        add(tips,txt("• Adımlar telefonunun fiziksel hareket sensöründen gelir.\n• Mesafe = adım sayısı × adım uzunluğu.\n• Kalori ve aktif dakika tahminidir.\n• GPS ve internet gerekmez.\n• Bildirim ve ana ekran aynı adımları okur.\n• Adım sayacı ve adım algılayıcı önceliklidir.\n• Donanım sensörü gecikirse ritmik yürüyüş desteği çalışır.\n• Yanlış sallama sayımını azaltmak için art arda 5 düzenli adım gerekir.\n• Telefonun donanımına göre ilk sayım gecikebilir.\n• Bildirimde takip açıkken sensör kullanılmaya devam edilir.\n• Pili korumak için sürekli GPS kullanılmaz.",13,false,muted),12);
+        add(tips,txt("• Adımlar telefonunun fiziksel hareket sensöründen gelir.\n• Mesafe = adım sayısı × adım uzunluğu.\n• Kalori ve aktif dakika tahminidir.\n• GPS ve internet gerekmez.\n• Bildirim ve ana ekran aynı adımları okur.\n• Adım sayacı ve adım algılayıcı önceliklidir.\n• Donanım sensörü gecikirse ritmik yürüyüş desteği çalışır.\n• Yanlış sallama sayımını azaltmak için art arda 4 düzenli adım gerekir.\n• Ayarlardan düşük, normal ve yüksek yürüyüş hassasiyeti seçilebilir.\n• Telefonun donanımına göre ilk sayım gecikebilir.\n• Bildirimde takip açıkken sensör kullanılmaya devam edilir.\n• Pili korumak için sürekli GPS kullanılmaz.",13,false,muted),12);
         LinearLayout diagnostic=box(15);add(content,diagnostic,14);
-        label(diagnostic,"Sensör tanılama","Yürüyüşe rağmen sayaç sıfırda kalıyorsa kontrol et");
+        label(diagnostic,"Sensör tanılama","Donanım ve hareket sensöründen gerçek zamanlı veriler");
         add(diagnostic,txt("Donanım sayaç olayı: "+StepService.counterEvents+
             "  |  Donanım adım olayı: "+StepService.detectorEvents+
             "\\nHareket ritmi tepesi: "+StepService.gaitPeaks+
             "  |  Onay: %"+StepService.confidence+
-            "\\nSon sayım: "+StepService.lastSource,12,false,muted),10);
+            "\\nHareket ölçümü: "+StepService.motionSamples+
+            "  |  Son sinyal: "+String.format(TR,"%.2f",StepService.signalPeak)+
+            "\\nDurum: "+StepService.lastSource,12,false,muted),10);
         action(content,"HAREKET İZNİNİ KONTROL ET",()->beginTracking());
         action(content,"BUGÜNÜN ADIMLARINI SIFIRLA",()->new AlertDialog.Builder(this)
             .setTitle("Bugünün adımları sıfırlansın mı?")
@@ -368,7 +384,7 @@ public class MainActivity extends Activity {
         action(content,"GEÇMİŞİ SIFIRLA",()->new AlertDialog.Builder(this).setTitle("Adım kayıtları silinsin mi?")
             .setMessage("Son 30 gün ve diğer tüm birikmiş adımlar bu cihazdan silinecek. Geri alınamaz.")
             .setNegativeButton("İptal",null).setPositiveButton("Sil",(dialog,which)->{StepStore.clearHistory(this);render();}).show());
-        add(content,txt("Adım+ • v1.5 Test  |  Çevrimdışı  |  Hesap gerekmez",11,false,muted),18);
+        add(content,txt("Adım+ • v1.6 Test  |  Çevrimdışı  |  Hesap gerekmez",11,false,muted),18);
     }
     void setting(LinearLayout parent,String title,String v,String key,int min,int max){
         LinearLayout row=line();row.setPadding(dp(8),dp(14),dp(8),dp(14));
