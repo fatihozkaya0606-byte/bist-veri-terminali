@@ -30,7 +30,21 @@ public final class NeonDashboard extends View {
     private void reset(){p.reset();p.setAntiAlias(true);p.setFilterBitmap(true);p.setStrokeCap(Paint.Cap.ROUND);p.setStrokeJoin(Paint.Join.ROUND);}
     private void text(Canvas c,String value,float x,float baseline,float sp,int col,boolean bold){
         reset();p.setTypeface(bold?Typeface.create("sans-serif",Typeface.BOLD):Typeface.create("sans-serif",Typeface.NORMAL));
+        // Android Paint.reset() can retain text alignment on certain renderers.
+        // Force LEFT; otherwise labels are drawn centered on x and clipped.
+        p.setTextAlign(Paint.Align.LEFT);
         p.setTextSize(sp);p.setColor(col);c.drawText(value,x,baseline,p);
+    }
+    private void textFit(Canvas c,String value,float x,float baseline,float sp,float maxWidth,int col,boolean bold){
+        reset();
+        p.setTextAlign(Paint.Align.LEFT);
+        p.setTypeface(Typeface.create("sans-serif",bold?Typeface.BOLD:Typeface.NORMAL));
+        p.setTextSize(sp);p.setColor(col);
+        if(p.measureText(value)>maxWidth && maxWidth>0){
+            p.setTextSize(Math.max(7.3f,sp*maxWidth/p.measureText(value)));
+        }
+        c.save();c.clipRect(x-1,baseline-sp-6,x+maxWidth+1,baseline+6);
+        c.drawText(value,x,baseline,p);c.restore();
     }
     private void center(Canvas c,String value,float x,float baseline,float sp,int col,boolean bold){
         reset();p.setTextAlign(Paint.Align.CENTER);
@@ -90,7 +104,7 @@ public final class NeonDashboard extends View {
         chart(c,12,543,366,105);
         grad(c,12,656,366,39,19,0xFF0C2942,0xFF0A1C31,0xFF1B6E93);
         text(c,"◎",24,682,26,MINT,true);
-        text(c,"Günlük hedefin için "+fmt(Math.max(0,goal-steps))+" adım daha at!",51,680,12,WHITE,false);
+        textFit(c,"Günlük hedefin için "+fmt(Math.max(0,goal-steps))+" adım daha at!",51,680,12,290,WHITE,false);
         text(c,"›",362,683,25,WHITE,false);
         raw.restore();
     }
@@ -160,10 +174,11 @@ public final class NeonDashboard extends View {
         grad(c,270,90,111,39,19,0xFF034239,0xFF041D2E,0xFF1DFCCB);
         reset();p.setColor(0xFF3BF976);p.setShadowLayer(5,0,0,0xFF1AFF84);
         c.drawCircle(283,108,4.3f,p);p.clearShadowLayer();
-        text(c,"♙",292,117,19,MINT,true);
-        text(c,StepService.isWalkingMode?"HIZLI":"YÜRÜYÜŞ",314,105,9,MINT,true);
-        text(c,StepService.isWalkingMode?"YÜRÜYÜŞ":"TAKİBİ",314,116,9,MINT,true);
-        text(c,StepService.isWalkingMode?"DURDUR":StepService.isSensorReady?"AKTİF":"BEKLEME",314,127,9,StepService.isSensorReady?MINT:0xFFFFC47A,true);
+        text(c,"●",291,115,12,MINT,true);
+        textFit(c,StepService.isWalkingMode?"HIZLI":"ADIM",309,104,9,68,MINT,true);
+        textFit(c,StepService.isWalkingMode?"YÜRÜYÜŞ":"SENSÖRÜ",309,116,9,68,MINT,true);
+        textFit(c,StepService.isWalkingMode?"DURDUR":"HIZLI BAŞLAT",309,126,8.2f,68,
+            StepService.isWalkingMode?0xFFFFE19B:MINT,true);
     }
     private void badge(Canvas c,float x,float y,int type,String glyph){
         int[] highlights={0xFF127AEF,0xFFF26A33,0xFFFF3772,0xFF04A78C};
@@ -184,9 +199,9 @@ public final class NeonDashboard extends View {
         c.restore();
         badge(c,x+8,y+10,kind,glyph);
         float tx=x+42;
-        text(c,title,tx,y+20,title.length()>11?8.6f:10.5f,SOFT,true);
-        text(c,value,tx,y+45,width<125?17:21,WHITE,true);
-        text(c,sub,tx,y+62,10.5f,SOFT,false);
+        textFit(c,title,tx,y+20,title.length()>11?8.6f:10.5f,width-46,SOFT,true);
+        textFit(c,value,tx,y+45,width<125?17:21,width-45,WHITE,true);
+        textFit(c,sub,tx,y+62,10.5f,width-45,SOFT,false);
         if(kind==2){
             Path ecg=new Path();ecg.moveTo(x+width-47,y+67);ecg.lineTo(x+width-35,y+67);ecg.lineTo(x+width-30,y+53);ecg.lineTo(x+width-26,y+70);ecg.lineTo(x+width-19,y+40);ecg.lineTo(x+width-13,y+61);ecg.lineTo(x+width-5,y+58);
             reset();p.setStyle(Paint.Style.STROKE);p.setStrokeWidth(1.5f);p.setColor(0xFFFF557D);c.drawPath(ecg,p);p.setStyle(Paint.Style.FILL);
@@ -197,8 +212,8 @@ public final class NeonDashboard extends View {
         grad(c,x,y,width,h,14,0xFF0B3A5A,0xFF0B1E33,0xFF137AB5);
         badge(c,x+9,y+10,0,"◉");
         text(c,"YÜRÜYÜŞ TEMPOSU",x+43,y+21,10,SOFT,true);
-        text(c,fmt(pace)+" adım/dk",x+43,y+45,19,MINT,true);
-        text(c,"Son 5 dakika: "+(pace>90?"Tempolu":pace>15?"Yürüyüş":"Hareketsiz"),x+43,y+62,10,SOFT,false);
+        textFit(c,fmt(pace)+" adım/dk",x+43,y+45,19,width-55,MINT,true);
+        textFit(c,"Son 5 dakika: "+(pace>90?"Tempolu":pace>15?"Yürüyüş":"Hareketsiz"),x+43,y+62,10,width-50,SOFT,false);
         for(int i=0;i<5;i++){
             int n=StepStore.minuteSteps(host,-4+i);
             float hBar=6+Math.min(22,n/4f);
@@ -208,8 +223,8 @@ public final class NeonDashboard extends View {
     private void water(Canvas c,float x,float y,float w,float h,int n,int g){
         grad(c,x,y,w,h,14,0xFF063F5C,0xFF061C31,0xFF139CD0);
         badge(c,x+8,y+9,0,"♢");
-        text(c,"SU TAKİBİ",x+44,y+20,10,SOFT,true);
-        text(c,String.format(tr,"%.1f / %.1f L",n/1000f,g/1000f),x+43,y+44,17,WHITE,true);
+        textFit(c,"SU TAKİBİ",x+44,y+20,10,w-49,SOFT,true);
+        textFit(c,String.format(tr,"%.1f / %.1f L",n/1000f,g/1000f),x+43,y+44,17,w-51,WHITE,true);
         rounded(c,x+w-35,y+10,x+w-7,y+38,14,0xFF045071,0xFF168FE0);
         center(c,"+",x+w-21,y+31,23,MINT,true);
         for(int i=0;i<4;i++){
@@ -223,7 +238,7 @@ public final class NeonDashboard extends View {
     private void chart(Canvas c,float x,float y,float width,float h){
         grad(c,x,y,width,h,17,0xFF082942,0xFF081B2E,0xFF1D6B9A);
         text(c,"▥",x+13,y+23,20,BLUE,true);
-        text(c,"SAATLİK HAREKET GRAFİĞİ",x+39,y+22,11,SOFT,true);
+        textFit(c,"SAATLİK HAREKET GRAFİĞİ",x+39,y+22,11,width-124,SOFT,true);
         text(c,"Bugün  ›",x+width-64,y+21,11,SOFT,false);
         float top=y+38,base=y+86,left=x+36,right=x+width-10;
         for(int j=0;j<3;j++){
