@@ -10,6 +10,7 @@ import java.util.Locale;
 
 public class StepService extends Service implements SensorEventListener {
     public static final String CHANNEL="adim_takip";
+    public static final String UPDATE_ACTION="com.fatih.adimsayar.STEP_UPDATED";
     private SensorManager manager;
     private Sensor sensor;
     private boolean counter;
@@ -28,18 +29,21 @@ public class StepService extends Service implements SensorEventListener {
         }
         try {startForeground(5,notification());}catch(Exception ex){stopSelf();return START_NOT_STICKY;}
         if(sensor==null) {
-            sensor=manager.getDefaultSensor(Sensor.TYPE_STEP_COUNTER);
-            counter=sensor!=null;
-            if(sensor==null) sensor=manager.getDefaultSensor(Sensor.TYPE_STEP_DETECTOR);
-            if(sensor!=null)manager.registerListener(this,sensor,SensorManager.SENSOR_DELAY_NORMAL);
+            // TYPE_STEP_DETECTOR hızlı geri bildirim sağlar. Yoksa sayaç sensörü kullanılır.
+            sensor=manager.getDefaultSensor(Sensor.TYPE_STEP_DETECTOR);
+            counter=false;
+            if(sensor==null){sensor=manager.getDefaultSensor(Sensor.TYPE_STEP_COUNTER);counter=true;}
+            if(sensor!=null)manager.registerListener(this,sensor,SensorManager.SENSOR_DELAY_FASTEST,0);
         }
         return START_STICKY;
     }
     @Override public void onSensorChanged(SensorEvent event) {
         if(event.values.length==0)return;
+        int before=StepStore.steps(this,0);
         if(counter)StepStore.ingestCounter(this,event.values[0]);
         else StepStore.add(this,1);
         int today=StepStore.steps(this,0);
+        if(today!=before)sendBroadcast(new Intent(UPDATE_ACTION).setPackage(getPackageName()));
         if(today>=StepStore.goal(this) && !reached && !StepStore.prefs(this).getString("goal_alert","").equals(StepStore.day(0))) {
             reached=true;
             StepStore.prefs(this).edit().putString("goal_alert",StepStore.day(0)).apply();
