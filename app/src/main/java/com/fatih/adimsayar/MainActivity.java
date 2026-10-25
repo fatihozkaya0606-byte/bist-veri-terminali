@@ -82,7 +82,7 @@ public class MainActivity extends Activity {
         LinearLayout head=line();head.setPadding(dp(18),dp(11),dp(18),dp(6));
         TextView logo=txt("ADIM+   ✦",24,true,MINT);
         head.addView(logo,new LinearLayout.LayoutParams(0,-2,1));
-        TextView ver=txt("●  TEST 2.1",11,true,0xFFB6D5F1);
+        TextView ver=txt("●  TEST 2.2",11,true,0xFFB6D5F1);
         ver.setPadding(dp(12),dp(7),dp(12),dp(7));
         ver.setBackground(shape(0xFF0A2742,18,0xFF245E8D));head.addView(ver);
         root.addView(head);
@@ -293,7 +293,7 @@ public class MainActivity extends Activity {
         setting(b,"Adım uzunluğu",StepStore.stride(this)+" cm","stride",30,150);
         setting(b,"Günlük su hedefi",WellnessStore.waterTarget(this)+" ml","water_target",500,5000);
         LinearLayout accuracy=box(15);add(content,accuracy,12);
-        label(accuracy,"Hatasız otomatik takip","Telefonu sallamak adım sayılmasın");
+                label(accuracy,"Donanım adım takibi","Gereksiz telefon hareketlerini saymayı azaltır");
         add(accuracy,txt("Otomatik mod yalnızca Android'in donanımsal adım sayacı ve adım algılayıcısını kullanır. Veriler cihaz tarafından birkaç saniye gecikmeli gelebilir. Ana ekrandaki Yürüyüş Takibi düğmesiyle isteğe bağlı hızlı yürüyüş sayımını başlatıp durdurabilirsin.",12,false,muted),9);
         action(content,StepService.isWalkingMode?"HIZLI YÜRÜYÜŞÜ DURDUR":"HIZLI YÜRÜYÜŞÜ BAŞLAT",()->toggleWalkMode());
         final String[] sensitivityLevels={"Düşük (yanlış sayımı azalt)","Normal (önerilen)","Yüksek (yavaş yürüyüş)"};
@@ -316,13 +316,13 @@ public class MainActivity extends Activity {
         sw.setOnCheckedChangeListener((button,isChecked)->{StepStore.prefs(this).edit().putBoolean("dark",isChecked).apply();dark=isChecked;render();});
         LinearLayout tips=box(16);add(content,tips,14);
         label(tips,"Nasıl ölçülüyor?","Verilerini doğru yorumla");
-        add(tips,txt("• Adımlar telefonunun fiziksel hareket sensöründen gelir.\n• Mesafe = adım sayısı × adım uzunluğu.\n• Kalori ve aktif dakika tahminidir.\n• GPS ve internet gerekmez.\n• Bildirim ve ana ekran aynı adımları okur.\n• Adım sayacı ve adım algılayıcı önceliklidir.\n• Otomatik takipte yalnızca donanımsal adım olayları sayılır.\n• Hızlı yürüyüş ritmi yalnızca kullanıcı modunu açınca sayılır.\n• Yanlış sallama sayımını azaltmak için art arda 4 düzenli adım gerekir.\n• Ayarlardan düşük, normal ve yüksek yürüyüş hassasiyeti seçilebilir.\n• Telefonun donanımına göre ilk sayım gecikebilir.\n• Bildirimde takip açıkken sensör kullanılmaya devam edilir.\n• Pili korumak için sürekli GPS kullanılmaz.",13,false,muted),12);
+        add(tips,txt("• Adımlar telefonunun fiziksel hareket sensöründen gelir.\n• Mesafe = adım sayısı × adım uzunluğu.\n• Kalori ve aktif dakika tahminidir.\n• GPS ve internet gerekmez.\n• Bildirim ve ana ekran aynı adımları okur.\n• Adım sayacı ve adım algılayıcı önceliklidir.\n• Otomatik takipte yalnızca donanımsal adım olayları sayılır.\n• Hızlı yürüyüş ritmi yalnızca kullanıcı modunu açınca sayılır.\n• Hızlı yürüyüşte art arda 3 düzenli adım ritmi aranır.\n• Ayarlardan düşük, normal ve yüksek yürüyüş hassasiyeti seçilebilir.\n• Telefonun donanımına göre ilk sayım gecikebilir.\n• Bildirimde takip açıkken sensör kullanılmaya devam edilir.\n• Pili korumak için sürekli GPS kullanılmaz.",13,false,muted),12);
         LinearLayout diagnostic=box(15);add(content,diagnostic,14);
         label(diagnostic,"Sensör tanılama","Donanım ve hareket sensöründen gerçek zamanlı veriler");
         add(diagnostic,txt("Donanım sayaç olayı: "+StepService.counterEvents+
             "  |  Donanım adım olayı: "+StepService.detectorEvents+
             "\\nHareket ritmi tepesi: "+StepService.gaitPeaks+
-            "  |  Onay: %"+StepService.confidence+
+            "  |  Ritim: %"+StepService.confidence+
             "\\nHareket ölçümü: "+StepService.motionSamples+
             "  |  Son sinyal: "+String.format(TR,"%.2f",StepService.signalPeak)+
             "\\nDurum: "+StepService.lastSource,12,false,muted),10);
@@ -335,7 +335,7 @@ public class MainActivity extends Activity {
         action(content,"GEÇMİŞİ SIFIRLA",()->new AlertDialog.Builder(this).setTitle("Adım kayıtları silinsin mi?")
             .setMessage("Son 30 gün ve diğer tüm birikmiş adımlar bu cihazdan silinecek. Geri alınamaz.")
             .setNegativeButton("İptal",null).setPositiveButton("Sil",(dialog,which)->{StepStore.clearHistory(this);render();}).show());
-        add(content,txt("Adım+ • v2.1 Test  |  Çevrimdışı  |  Hesap gerekmez",11,false,muted),18);
+        add(content,txt("Adım+ • v2.2 Test  |  Çevrimdışı  |  Hesap gerekmez",11,false,muted),18);
     }
     void setting(LinearLayout parent,String title,String v,String key,int min,int max){
         LinearLayout row=line();row.setPadding(dp(8),dp(14),dp(8),dp(14));
