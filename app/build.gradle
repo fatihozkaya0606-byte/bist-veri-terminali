@@ -6,8 +6,8 @@ android {
         applicationId 'com.fatih.adimsayar'
         minSdk 26
         targetSdk 35
-        versionCode 9
-        versionName '2.1-hardware-test'
+        versionCode 10
+        versionName '2.2-layout-step-test'
     }
     compileOptions { sourceCompatibility JavaVersion.VERSION_17; targetCompatibility JavaVersion.VERSION_17 }
 }
