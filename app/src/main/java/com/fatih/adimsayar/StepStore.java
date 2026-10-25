@@ -78,6 +78,19 @@ public final class StepStore {
         // Değerler StepService tarafından iki kez sayılmadan uzlaştırılarak kaydedilir.
         return delta;
     }
+    public static synchronized void clearToday(Context c){
+        SharedPreferences p=prefs(c);
+        int n=steps(c,0);
+        String current=day(0);
+        SharedPreferences.Editor e=p.edit();
+        for(String k:p.getAll().keySet()){
+            if(k.equals("d_"+current)||k.startsWith("h_"+current+"_")||k.startsWith("min_"+current+"_")){
+                e.remove(k);
+            }
+        }
+        e.putLong("lifetime",Math.max(0L,p.getLong("lifetime",0)-n));
+        e.apply();
+    }
     public static void clearHistory(Context c) {
         SharedPreferences p=prefs(c);SharedPreferences.Editor e=p.edit();
         for(String k:p.getAll().keySet()) if(k.startsWith("d_")||k.startsWith("h_")||k.startsWith("min_")||k.equals("lifetime"))e.remove(k);
