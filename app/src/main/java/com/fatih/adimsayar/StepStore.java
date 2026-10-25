@@ -20,6 +20,20 @@ public final class StepStore {
     public static String hour() { return new SimpleDateFormat("HH", Locale.US).format(new Date()); }
     public static int steps(Context c,int offset) { return prefs(c).getInt("d_"+day(offset),0); }
     public static int hourSteps(Context c,int hour) { return prefs(c).getInt("h_"+day(0)+"_"+String.format(Locale.US,"%02d",hour),0); }
+    public static int minuteSteps(Context c,int offset) {
+        Calendar cal=Calendar.getInstance();cal.add(Calendar.MINUTE,offset);
+        String id=new SimpleDateFormat("yyyy-MM-dd_HH-mm",Locale.US).format(cal.getTime());
+        return prefs(c).getInt("min_"+id,0);
+    }
+    public static int pace(Context c) {
+        int sum=0;for(int i=0;i<5;i++)sum+=minuteSteps(c,-i);
+        return Math.round(sum/5f);
+    }
+    public static String busiestHour(Context c) {
+        int max=0,hour=0;
+        for(int h=0;h<24;h++){int x=hourSteps(c,h);if(x>max){max=x;hour=h;}}
+        return String.format(Locale.US,"%02d:00 (%d adım)",hour,max);
+    }
     public static int goal(Context c) { return prefs(c).getInt("goal",8000); }
     public static int height(Context c) { return prefs(c).getInt("height",175); }
     public static int weight(Context c) { return prefs(c).getInt("weight",75); }
@@ -45,9 +59,11 @@ public final class StepStore {
         if(n>20000)n=20000;
         SharedPreferences p=prefs(c);
         String d=day(0),h=hour();
+        String minute=new SimpleDateFormat("yyyy-MM-dd_HH-mm",Locale.US).format(new Date());
         p.edit().putInt("d_"+d,p.getInt("d_"+d,0)+n)
                 .putInt("h_"+d+"_"+h,p.getInt("h_"+d+"_"+h,0)+n)
-                .putLong("lifetime",p.getLong("lifetime",0)+n).apply();
+                .putLong("lifetime",p.getLong("lifetime",0)+n)
+                .putInt("min_"+minute,p.getInt("min_"+minute,0)+n).apply();
     }
     public static synchronized int ingestCounter(Context c,float raw) {
         SharedPreferences p=prefs(c);
@@ -64,7 +80,7 @@ public final class StepStore {
     }
     public static void clearHistory(Context c) {
         SharedPreferences p=prefs(c);SharedPreferences.Editor e=p.edit();
-        for(String k:p.getAll().keySet()) if(k.startsWith("d_")||k.startsWith("h_")||k.equals("lifetime"))e.remove(k);
+        for(String k:p.getAll().keySet()) if(k.startsWith("d_")||k.startsWith("h_")||k.startsWith("min_")||k.equals("lifetime"))e.remove(k);
         e.apply();
     }
 }

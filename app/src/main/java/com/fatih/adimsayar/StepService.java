@@ -17,6 +17,8 @@ public class StepService extends Service implements SensorEventListener {
     private long lastNotification=0;
     private int notifiedSteps=-1;
     private boolean reached=false;
+    private final Handler notifyHandler=new Handler(Looper.getMainLooper());
+    private final Runnable flushNotification=()->sendStepNotification();
     @Override public void onCreate() {
         super.onCreate();
         manager=(SensorManager)getSystemService(SENSOR_SERVICE);
@@ -52,11 +54,20 @@ public class StepService extends Service implements SensorEventListener {
                 .setContentText(String.format(new Locale("tr","TR"),"%s adım! Harika gidiyorsun.",today))
                 .setSmallIcon(R.drawable.ic_steps).setAutoCancel(true).build());
         }
+        // Bildirimi hızlı yenile; son adımın da doğru görünmesini sağla.
         long now=SystemClock.elapsedRealtime();
-        if(now-lastNotification>60000 || Math.abs(today-notifiedSteps)>=100){
+        if(today!=notifiedSteps && now-lastNotification>600)sendStepNotification();
+        notifyHandler.removeCallbacks(flushNotification);
+        notifyHandler.postDelayed(flushNotification,700);
+    }
+    private void sendStepNotification(){
+        int steps=StepStore.steps(this,0);
+        if(steps==notifiedSteps)return;
+        try{
             ((NotificationManager)getSystemService(NOTIFICATION_SERVICE)).notify(5,notification());
-            lastNotification=now;notifiedSteps=today;
-        }
+            notifiedSteps=steps;
+            lastNotification=SystemClock.elapsedRealtime();
+        }catch(Exception e){android.util.Log.w("AdimPlus","Bildirim sorunu",e);}
     }
     private Notification notification() {
         int n=StepStore.steps(this,0),g=StepStore.goal(this);
@@ -64,11 +75,15 @@ public class StepService extends Service implements SensorEventListener {
         PendingIntent pending=PendingIntent.getActivity(this,0,go,PendingIntent.FLAG_UPDATE_CURRENT|PendingIntent.FLAG_IMMUTABLE);
         return new Notification.Builder(this,CHANNEL)
             .setSmallIcon(R.drawable.ic_steps).setContentTitle("Adım+ • Adım takibi açık")
-            .setContentText(String.format(new Locale("tr","TR"),"%d / %d adım • Hedef%%%d",n,g,Math.min(999,n*100/Math.max(1,g))))
+            .setContentText(String.format(new Locale("tr","TR"),"%,d / %,d adım • %d%% tamamlandı",n,g,n*100/Math.max(1,g)))
             .setContentIntent(pending).setOngoing(true).setOnlyAlertOnce(true)
             .setCategory(Notification.CATEGORY_SERVICE).build();
     }
     @Override public void onAccuracyChanged(Sensor s,int accuracy) {}
-    @Override public void onDestroy() {if(manager!=null)manager.unregisterListener(this);super.onDestroy();}
+    @Override public void onDestroy() {
+        notifyHandler.removeCallbacksAndMessages(null);
+        if(manager!=null)manager.unregisterListener(this);
+        super.onDestroy();
+    }
     @Override public IBinder onBind(Intent intent) {return null;}
 }

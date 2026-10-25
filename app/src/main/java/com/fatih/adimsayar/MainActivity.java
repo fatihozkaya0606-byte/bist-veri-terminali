@@ -16,14 +16,15 @@ import java.text.*;
 import java.util.*;
 
 public class MainActivity extends Activity {
-    private static final int MINT=0x58F5DB;
-    private static final int BLUE=0x60B8FF;
+    private static final int MINT=0xFF58F5DB;
+    private static final int BLUE=0xFF60B8FF;
     private boolean dark=true;
     private int bg,card,fg,muted,border,smallCard;
     private int page=0;
     private Ring liveRing;
     private TextView liveGoal,livePercent,liveDistance,liveCalories,liveMinutes,liveLifetime;
     private ProgressBar liveProgress;
+    private TextView livePace,liveActivity;
     private Bars liveBars;
     private boolean receiverRegistered=false;
     private final BroadcastReceiver stepReceiver=new BroadcastReceiver(){
@@ -72,13 +73,13 @@ public class MainActivity extends Activity {
     void render(){
         colors(); displayed=StepStore.steps(this,0);
         liveRing=null;liveGoal=null;livePercent=null;liveDistance=null;
-        liveCalories=null;liveMinutes=null;liveLifetime=null;liveProgress=null;liveBars=null;
+        liveCalories=null;liveMinutes=null;liveLifetime=null;livePace=null;liveActivity=null;liveProgress=null;liveBars=null;
         root=new LinearLayout(this);root.setOrientation(LinearLayout.VERTICAL);root.setBackgroundColor(bg);
         setContentView(root);
         LinearLayout head=line();head.setPadding(dp(22),dp(8),dp(22),dp(5));
         TextView logo=txt("ADIM+   ✦",23,true,MINT);
         head.addView(logo,new LinearLayout.LayoutParams(0,-2,1));
-        TextView ver=txt("●  TEST 1.1",11,true,muted);head.addView(ver);
+        TextView ver=txt("●  TEST 1.2",11,true,muted);head.addView(ver);
         root.addView(head);
         scroll=new ScrollView(this);scroll.setFillViewport(false);scroll.setVerticalScrollBarEnabled(false);
         content=new LinearLayout(this);content.setPadding(dp(16),dp(2),dp(16),dp(22));content.setOrientation(1);scroll.addView(content);
@@ -105,7 +106,7 @@ public class MainActivity extends Activity {
             new int[]{dark?0xFF19374B:0xFFE7FCF7,card}));
         add(content,hero,12);
         liveRing=new Ring(steps,goal);
-        hero.addView(liveRing,new LinearLayout.LayoutParams(-1,dp(196)));
+        hero.addView(liveRing,new LinearLayout.LayoutParams(-1,dp(188)));
         liveGoal=txt("",13,true,MINT);liveGoal.setGravity(Gravity.CENTER);hero.addView(liveGoal);
         livePercent=txt("",12,false,muted);livePercent.setGravity(Gravity.CENTER);add(hero,livePercent,6);
         liveProgress=new ProgressBar(this,null,android.R.attr.progressBarStyleHorizontal);
@@ -128,6 +129,16 @@ public class MainActivity extends Activity {
         row=line();add(content,row,8);
         liveMinutes=stat(row,"AKTİF SÜRE*","~"+fmt(StepStore.activeMinutes(steps))+" dk","◷",MINT);
         liveLifetime=stat(row,"TOPLAM ADIM",fmt((int)Math.min(Integer.MAX_VALUE,StepStore.prefs(this).getLong("lifetime",0))),"⌁",BLUE);
+        LinearLayout tempoPanel=box(13);add(content,tempoPanel,10);
+        LinearLayout tempoLine=line();
+        LinearLayout tempoLeft=new LinearLayout(this);tempoLeft.setOrientation(1);
+        tempoLeft.addView(txt("YÜRÜYÜŞ TEMPOSU",12,true,muted));
+        livePace=txt("0 adım/dk",20,true,MINT);add(tempoLeft,livePace,6);
+        tempoLine.addView(tempoLeft,new LinearLayout.LayoutParams(0,-2,1));
+        LinearLayout tempoRight=new LinearLayout(this);tempoRight.setOrientation(1);
+        TextView paceLbl=txt("SON 5 DAKİKA",11,true,muted);paceLbl.setGravity(Gravity.RIGHT);tempoRight.addView(paceLbl);
+        liveActivity=txt("Sensör ölçümü",12,false,fg);liveActivity.setGravity(Gravity.RIGHT);add(tempoRight,liveActivity,8);
+        tempoLine.addView(tempoRight);tempoPanel.addView(tempoLine);
         LinearLayout waterCard=box(14);add(content,waterCard,12);
         LinearLayout wr=line();
         LinearLayout wl=new LinearLayout(this);wl.setOrientation(1);
@@ -179,11 +190,15 @@ public class MainActivity extends Activity {
     private void updateLivePanels(){
         if(page!=0||liveRing==null)return;
         int steps=StepStore.steps(this,0);
+        int pace=StepStore.pace(this);
+        if(livePace!=null)livePace.setText(pace+" adım/dk");
+        if(liveActivity!=null)liveActivity.setText(pace>100?"Tempolu yürüyüş":pace>=35?"Yürüyüş":pace>0?"Hafif hareket":"Hareketsiz");
         if(steps==displayed && livePercent!=null && livePercent.getText().length()>0)return;
         displayed=steps;int goal=StepStore.goal(this);
         liveRing.setSteps(steps);
         liveGoal.setText(steps>=goal?"✦  GÜNLÜK HEDEF TAMAMLANDI":"HEDEFE "+fmt(Math.max(0,goal-steps))+" ADIM KALDI");
-        livePercent.setText(fmt(steps)+" / "+fmt(goal)+" adım    •    %"+(steps*100/Math.max(1,goal)));
+        livePercent.setText(fmt(steps)+" / "+fmt(goal)+" adım    •    %"+
+        (steps*100<goal*10?String.format(TR,"%.1f",steps*100f/Math.max(1,goal)):String.valueOf(steps*100/Math.max(1,goal))));
         liveProgress.setProgress(Math.min(goal,steps));
         liveDistance.setText(km(StepStore.distanceKm(this,steps))+" km");
         liveCalories.setText(fmt(StepStore.calories(this,steps))+" kcal");
@@ -229,6 +244,12 @@ public class MainActivity extends Activity {
         label(wk,"7 günlük adımlar","Günlere göre yürüyüş performansı");
         int[] a=new int[7];for(int i=0;i<7;i++)a[i]=StepStore.steps(this,i-6);
         wk.addView(new Bars(a,7),new LinearLayout.LayoutParams(-1,dp(195)));
+        LinearLayout compare=box(16);add(content,compare,13);
+        label(compare,"Haftalık karşılaştırma","Son 7 gün ve önceki 7 gün");
+        int previousWeek=0;for(int i=7;i<14;i++)previousWeek+=StepStore.steps(this,-i);
+        int diff=week-previousWeek;
+        add(compare,txt((diff>=0?"↑ +":"↓ ")+fmt(diff)+" adım",22,true,diff>=0?MINT:0xFFFFAFAF),12);
+        add(compare,txt("Önceki 7 gün: "+fmt(previousWeek)+" adım",12,false,muted),6);
         LinearLayout hydration=box(16);add(content,hydration,13);
         label(hydration,"Su tüketimi • Son 7 gün",String.format(TR,"%.1f litre toplam",WellnessStore.last7Water(this)/1000f));
         int[] waterWeek=new int[7];for(int i=0;i<7;i++)waterWeek[i]=WellnessStore.water(this,i-6);
@@ -243,6 +264,8 @@ public class MainActivity extends Activity {
         summary(p,"Son 30 günde hedef",StepStore.goalDays(this)+" / 30 gün");
         summary(p,"30 günlük mesafe",km(StepStore.distanceKm(this,month))+" km");
         summary(p,"Güncel kilo",String.format(TR,"%.1f kg",WellnessStore.currentWeight(this)));
+        summary(p,"Dünkü adımlar",fmt(StepStore.steps(this,-1))+" adım");
+        summary(p,"En yoğun saat",StepStore.busiestHour(this));
         LinearLayout achievements=box(16);add(content,achievements,14);
         label(achievements,"Başarı rozetleri","Ulaştığın günlük adım kilometre taşları");
         int rec=StepStore.record(this);int[] limits={1000,5000,10000,20000};
@@ -268,6 +291,30 @@ public class MainActivity extends Activity {
             add(box,pb,9);
         }
         add(content,txt("Geçmiş sadece uygulamanın sensörle topladığı adımları içerir; başka uygulamaların kayıtları otomatik aktarılmaz.",12,false,muted),15);
+        action(content,"SON 90 GÜNÜ CSV OLARAK KAYDET",()->exportCsv());
+    }
+    private void exportCsv(){
+        Intent intent=new Intent(Intent.ACTION_CREATE_DOCUMENT);
+        intent.addCategory(Intent.CATEGORY_OPENABLE);
+        intent.setType("text/csv");
+        intent.putExtra(Intent.EXTRA_TITLE,"AdimPlus_son90gun.csv");
+        startActivityForResult(intent,212);
+    }
+    @Override protected void onActivityResult(int request,int result,Intent data){
+        super.onActivityResult(request,result,data);
+        if(request!=212||result!=RESULT_OK||data==null||data.getData()==null)return;
+        try(java.io.OutputStream output=getContentResolver().openOutputStream(data.getData())){
+            if(output==null)throw new java.io.IOException("Dosya açılamadı");
+            java.io.OutputStreamWriter writer=new java.io.OutputStreamWriter(output,"UTF-8");
+            writer.write("Tarih,Adım,Mesafe_km,Tahmini_Kalori_kcal,Su_ml\\n");
+            for(int i=89;i>=0;i--){
+                int count=StepStore.steps(this,-i);
+                writer.write(StepStore.day(-i)+","+count+","+
+                    String.format(Locale.US,"%.3f",StepStore.distanceKm(this,count))+","+
+                    StepStore.calories(this,count)+","+WellnessStore.water(this,-i)+"\\n");
+            }
+            writer.flush();Toast.makeText(this,"90 günlük rapor kaydedildi",Toast.LENGTH_LONG).show();
+        }catch(Exception e){Toast.makeText(this,"Rapor kaydedilemedi: "+e.getMessage(),Toast.LENGTH_LONG).show();}
     }
     void settings(){
         headline("Kişisel ayarlar","Hedeflerini ve ölçümlerini düzenle");
@@ -284,12 +331,12 @@ public class MainActivity extends Activity {
         sw.setOnCheckedChangeListener((button,isChecked)->{StepStore.prefs(this).edit().putBoolean("dark",isChecked).apply();dark=isChecked;render();});
         LinearLayout tips=box(16);add(content,tips,14);
         label(tips,"Nasıl ölçülüyor?","Verilerini doğru yorumla");
-        add(tips,txt("• Adımlar telefonunun fiziksel hareket sensöründen gelir.\n• Mesafe = adım sayısı × adım uzunluğu.\n• Kalori ve aktif dakika tahminidir.\n• GPS ve internet gerekmez.\n• Bildirimde takip açıkken sensör kullanılmaya devam edilir.\n• Pili korumak için sürekli GPS kullanılmaz.",13,false,muted),12);
+        add(tips,txt("• Adımlar telefonunun fiziksel hareket sensöründen gelir.\n• Mesafe = adım sayısı × adım uzunluğu.\n• Kalori ve aktif dakika tahminidir.\n• GPS ve internet gerekmez.\n• Bildirim ve ana ekran aynı adımları okur.\n• Telefon sensörü birkaç saniye gecikmeli adım gönderebilir.\n• Bildirimde takip açıkken sensör kullanılmaya devam edilir.\n• Pili korumak için sürekli GPS kullanılmaz.",13,false,muted),12);
         action(content,"HAREKET İZNİNİ KONTROL ET",()->beginTracking());
         action(content,"GEÇMİŞİ SIFIRLA",()->new AlertDialog.Builder(this).setTitle("Adım kayıtları silinsin mi?")
             .setMessage("Son 30 gün ve diğer tüm birikmiş adımlar bu cihazdan silinecek. Geri alınamaz.")
             .setNegativeButton("İptal",null).setPositiveButton("Sil",(dialog,which)->{StepStore.clearHistory(this);render();}).show());
-        add(content,txt("Adım+ • v1.1 Test  |  Çevrimdışı  |  Hesap gerekmez",11,false,muted),18);
+        add(content,txt("Adım+ • v1.2 Test  |  Çevrimdışı  |  Hesap gerekmez",11,false,muted),18);
     }
     void setting(LinearLayout parent,String title,String v,String key,int min,int max){
         LinearLayout row=line();row.setPadding(dp(8),dp(14),dp(8),dp(14));
