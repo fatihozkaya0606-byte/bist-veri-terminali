@@ -17,24 +17,14 @@ public class StepService extends Service implements SensorEventListener {
     public static volatile String sensorMode="";
 
     private SensorManager sensorManager;
-    private Sensor counterSensor, detectorSensor, accelerationSensor;
-    private boolean hasCounter=false, hasDetector=false, hasAccel=false;
-    private boolean accelRegistered=false, screenReceiverRegistered=false;
+    private Sensor counterSensor, detectorSensor;
+    private boolean hasCounter=false, hasDetector=false;
     private String sessionDay="";
-    private int counterSteps=0, quickSteps=0, detectorSteps=0, sessionPublished=0;
-    private float gx,gy,gz;
-    private boolean gravityReady=false, peakHigh=false;
-    private long lastPeakMs=0L;
+    private int counterSteps=0, detectorSteps=0, sessionPublished=0;
     private long lastNotification=0L;
     private int notifiedSteps=-1;
     private final Handler notifyHandler=new Handler(Looper.getMainLooper());
     private final Runnable flushNotification=()->sendStepNotification();
-
-    private final BroadcastReceiver screenReceiver=new BroadcastReceiver(){
-        @Override public void onReceive(Context context,Intent intent){
-// Ekran acilip kapaninca olcum modu degismez.
-        }
-    };
 
     @Override public void onCreate() {
         super.onCreate();
@@ -66,15 +56,6 @@ public class StepService extends Service implements SensorEventListener {
             if(detectorSensor!=null)
                 hasDetector=sensorManager.registerListener(this,detectorSensor,SensorManager.SENSOR_DELAY_FASTEST,0);
             // Yalniz donanim adim sayaci ve dedektorunu kaydet.
-            try{
-                IntentFilter filter=new IntentFilter();
-                filter.addAction(Intent.ACTION_SCREEN_ON);
-                filter.addAction(Intent.ACTION_SCREEN_OFF);
-                registerReceiver(screenReceiver,filter);
-                screenReceiverRegistered=true;
-            }catch(Exception ex){
-                android.util.Log.w("AdimPlus","Ekran alıcısı kaydedilemedi",ex);
-            }
             isSensorReady=hasCounter||hasDetector;
             sensorMode=hasCounter&&hasDetector?"Donanım adım sayacı + algılayıcı":
                        hasCounter?"Donanım adım sayacı":
@@ -84,23 +65,11 @@ public class StepService extends Service implements SensorEventListener {
         return START_STICKY;
     }
 
-    private void setAccelEnabled(boolean enable){
-        if(accelerationSensor==null || sensorManager==null)return;
-        if(enable && !accelRegistered){
-            hasAccel=sensorManager.registerListener(this,accelerationSensor,SensorManager.SENSOR_DELAY_GAME,0);
-            accelRegistered=hasAccel;
-            gravityReady=false;peakHigh=false;
-        }else if(!enable && accelRegistered){
-            sensorManager.unregisterListener(this,accelerationSensor);
-            accelRegistered=false;
-        }
-    }
-
     private void checkDay(){
         String today=StepStore.day(0);
         if(today.equals(sessionDay))return;
         sessionDay=today;
-        counterSteps=0;quickSteps=0;detectorSteps=0;sessionPublished=0;
+        counterSteps=0;detectorSteps=0;sessionPublished=0;
         notifiedSteps=-1;
     }
 
@@ -115,39 +84,14 @@ public class StepService extends Service implements SensorEventListener {
         }else if(type==Sensor.TYPE_STEP_DETECTOR){
             detectorSteps++;
             lastEventMs=SystemClock.elapsedRealtime();
-        }else if(type==Sensor.TYPE_ACCELEROMETER){
-            detectWalkingMotion(event.values);
         }else return;
         reconcileCounts();
-    }
-
-    private void detectWalkingMotion(float[] v){
-        if(v.length<3)return;
-        float x=v[0],y=v[1],z=v[2];
-        if(!gravityReady){
-            gx=x;gy=y;gz=z;gravityReady=true;
-            return;
-        }
-        final float alpha=0.87f;
-        gx=alpha*gx+(1f-alpha)*x;
-        gy=alpha*gy+(1f-alpha)*y;
-        gz=alpha*gz+(1f-alpha)*z;
-        float dx=x-gx,dy=y-gy,dz=z-gz;
-        float movement=(float)Math.sqrt(dx*dx+dy*dy+dz*dz);
-        long now=SystemClock.elapsedRealtime();
-        if(movement<0.62f)peakHigh=false;
-        if(!peakHigh && movement>1.35f && movement<14f && now-lastPeakMs>310){
-            peakHigh=true;
-            lastPeakMs=now;
-            quickSteps=Math.min(1000000,quickSteps+1);
-            lastEventMs=now;
-        }
     }
 
     private void reconcileCounts(){
         // Üç farklı sensörü ayrı ayrı TOPLAMAYIZ: aksi halde aynı adım 2 kez sayılır.
         // Donanım sayacı gecikirse hareket sensörü geçici olarak rakamı yükseltir.
-        int best=Math.max(counterSteps,Math.max(detectorSteps,quickSteps));
+        int best=Math.max(counterSteps,detectorSteps);
         if(best<=sessionPublished)return;
         int delta=best-sessionPublished;
         sessionPublished=best;
@@ -201,10 +145,6 @@ public class StepService extends Service implements SensorEventListener {
     @Override public void onDestroy(){
         notifyHandler.removeCallbacksAndMessages(null);
         if(sensorManager!=null)sensorManager.unregisterListener(this);
-        if(screenReceiverRegistered){
-            try{unregisterReceiver(screenReceiver);}catch(Exception ignored){}
-            screenReceiverRegistered=false;
-        }
         isRunning=false;isSensorReady=false;lastEventMs=0L;
         super.onDestroy();
     }
