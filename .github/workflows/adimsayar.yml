@@ -1,4 +1,4 @@
-name: AdimPlus 1.3 Test APK
+name: AdimPlus 1.4 Test APK
 on:
   workflow_dispatch:
   push:
@@ -29,16 +29,16 @@ jobs:
       - name: Preserve APK as artifact
         uses: actions/upload-artifact@v4
         with:
-          name: AdimPlus-v1.3-APK
+          name: AdimPlus-v1.4-APK
           path: app/build/outputs/apk/debug/app-debug.apk
           retention-days: 30
       - name: Publish direct APK link
         continue-on-error: true
         run: |
           mkdir -p downloads
-          cp app/build/outputs/apk/debug/app-debug.apk downloads/AdimPlus-v1.3.apk
+          cp app/build/outputs/apk/debug/app-debug.apk downloads/AdimPlus-v1.4.apk
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add downloads/AdimPlus-v1.3.apk
+          git add downloads/AdimPlus-v1.4.apk
           git commit -m "build: test pedometer APK [skip ci]" || true
           git push origin HEAD:adimsayar-android-test
