@@ -29,8 +29,11 @@ public class StepService extends Service implements SensorEventListener {
     private final Handler notifyHandler=new Handler(Looper.getMainLooper());
     private final Runnable notifyFlush=()->sendStepNotification();
 
-    private float gx,gy,gz,smoothed=0f;
-    private boolean gravReady=false,peakActive=false;
+    // Yön bağımsız, imzalı dikey ivme sinyali: v1.5'teki tek tetiklemede kilitlenmeyi giderir.
+    private float gx,gy,gz,filteredVertical=0f,olderVertical=0f,oldVertical=0f;
+    private boolean gravReady=false;
+    public static volatile int motionSamples=0;
+    public static volatile float signalPeak=0f;
     private long lastPeak=0L;
     private int candidateRun=0;
     private int lastInterval=0;
@@ -62,7 +65,7 @@ public class StepService extends Service implements SensorEventListener {
         if(!isRunning){
             isRunning=true;
             sessionDay=StepStore.day(0);
-            counterEvents=0;detectorEvents=0;gaitPeaks=0;confidence=0;
+            counterEvents=0;detectorEvents=0;gaitPeaks=0;confidence=0;motionSamples=0;signalPeak=0f;
             lastSource="Sensör olayları bekleniyor";
             stepCounter=manager.getDefaultSensor(Sensor.TYPE_STEP_COUNTER);
             stepDetector=manager.getDefaultSensor(Sensor.TYPE_STEP_DETECTOR);
@@ -91,7 +94,8 @@ public class StepService extends Service implements SensorEventListener {
         if(manager==null||accelerometer==null)return;
         if(enable&&!accelRegistered){
             accelRegistered=manager.registerListener(this,accelerometer,SensorManager.SENSOR_DELAY_GAME,0);
-            gravReady=false;peakActive=false;candidateRun=0;lastPeak=0;
+            gravReady=false;filteredVertical=0f;olderVertical=0f;oldVertical=0f;
+            candidateRun=0;lastPeak=0;lastInterval=0;motionSamples=0;signalPeak=0f;
         }else if(!enable&&accelRegistered){
             manager.unregisterListener(this,accelerometer);accelRegistered=false;
             candidateRun=0;confidence=0;
@@ -131,42 +135,58 @@ public class StepService extends Service implements SensorEventListener {
         mergeSteps();
     }
 
-    // Tek seferlik sallama adım DEĞİLDİR. Art arda düzenli yürüyüş ritmi aranır.
+    // Donanımdan adım gelmiyorsa, sadece ardışık düzenli yürüyüş ritmi için yedek sayım.
+    // Her sensör ölçümünde yükselip düşen ivme tepesini algılar: önceki sürümde
+    // eşik altına dönemeyen sinyal sayımı kilitliyordu.
     private void detectRhythmicWalking(float[] v){
         if(v.length<3)return;
+        motionSamples++;
         float x=v[0],y=v[1],z=v[2];
         if(!gravReady){gx=x;gy=y;gz=z;gravReady=true;return;}
-        gx=gx*0.86f+x*0.14f;
-        gy=gy*0.86f+y*0.14f;
-        gz=gz*0.86f+z*0.14f;
-        float dx=x-gx,dy=y-gy,dz=z-gz;
-        float linear=(float)Math.sqrt(dx*dx+dy*dy+dz*dz);
-        smoothed=0.3f*linear+0.7f*smoothed;
-        if(smoothed<0.68f)peakActive=false;
-        if(peakActive||smoothed<1.65f||smoothed>10f)return;
-        peakActive=true;
+        final float alpha=0.90f;
+        gx=alpha*gx+(1f-alpha)*x;
+        gy=alpha*gy+(1f-alpha)*y;
+        gz=alpha*gz+(1f-alpha)*z;
+        float g=(float)Math.sqrt(gx*gx+gy*gy+gz*gz);
+        if(g<3f)return;
+        float projected=((x-gx)*gx+(y-gy)*gy+(z-gz)*gz)/g;
+        filteredVertical=filteredVertical*0.58f+projected*0.42f;
+        float threshold=StepStore.prefs(this).getInt("sensitivity",1)==2?0.43f:
+                        StepStore.prefs(this).getInt("sensitivity",1)==0?0.91f:0.62f;
         long now=SystemClock.elapsedRealtime();
-        long interval=lastPeak==0?0:now-lastPeak;
-        if(lastPeak!=0&&interval<300)return;
+        if(lastPeak!=0 && now-lastPeak>1900L && candidateRun>0){
+            candidateRun=0;confidence=0;lastInterval=0;
+            lastSource="Yeni yürüyüş serisi bekleniyor";
+        }
+        // Pozitif yerel tepe; tekrar sıfıra dönmesini şart koşmayız.
+        boolean peak=oldVertical>olderVertical &&
+                     oldVertical>=filteredVertical &&
+                     oldVertical>threshold &&
+                     oldVertical<8.0f &&
+                     (lastPeak==0||now-lastPeak>=280L);
+        olderVertical=oldVertical;
+        oldVertical=filteredVertical;
+        if(!peak)return;
+        signalPeak=oldVertical;
         gaitPeaks++;
-        if(interval>=350 && interval<=930){
-            int variation=lastInterval==0?0:Math.abs((int)interval-lastInterval);
-            if(lastInterval==0||variation<235){
-                candidateRun++;
-            }else{
+        long interval=lastPeak==0?0:now-lastPeak;
+        if(interval>=285L&&interval<=1250L){
+            if(lastInterval==0||Math.abs((int)interval-lastInterval)<=400)
+                candidateRun=Math.min(50,candidateRun+1);
+            else
                 candidateRun=1;
-            }
             lastInterval=(int)interval;
         }else{
-            candidateRun=1;lastInterval=0;
+            candidateRun=1;
+            lastInterval=0;
         }
         lastPeak=now;
-        confidence=Math.min(100,candidateRun*20);
-        // 5 birbirine benzer ritmik adim olmadan SAYI DEGISMEZ.
-        if(candidateRun>=5){
-            int number=candidateRun==5?5:1;
-            rhythmSteps=Math.min(1000000,rhythmSteps+number);
-            lastSource="Doğrulanmış yürüyüş ritmi";
+        confidence=Math.min(100,candidateRun*25);
+        lastSource="Ritim denetimi "+Math.min(candidateRun,4)+"/4";
+        // 4 ardışık adım gelmeden ekrana adım yazılmaz.
+        if(candidateRun>=4){
+            rhythmSteps=Math.min(1000000,rhythmSteps+(candidateRun==4?4:1));
+            lastSource="Düzenli yürüyüş algılandı";
             lastEventMs=now;
         }
     }
