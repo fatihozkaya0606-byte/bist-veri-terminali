@@ -11,6 +11,9 @@ import java.util.Locale;
 public class StepService extends Service implements SensorEventListener {
     public static final String CHANNEL="adim_takip";
     public static final String UPDATE_ACTION="com.fatih.adimsayar.STEP_UPDATED";
+    public static final String WALK_ON="com.fatih.adimsayar.WALK_ON";
+    public static final String WALK_OFF="com.fatih.adimsayar.WALK_OFF";
+    public static volatile boolean isWalkingMode=false;
     public static volatile boolean isRunning=false;
     public static volatile boolean isSensorReady=false;
     public static volatile long lastEventMs=0L;
@@ -18,10 +21,11 @@ public class StepService extends Service implements SensorEventListener {
     public static volatile int counterEvents=0,detectorEvents=0,gaitPeaks=0;
     public static volatile int confidence=0;
     public static volatile String lastSource="Veri bekleniyor";
+    public static volatile int hardwareStepsReceived=0;
 
     private SensorManager manager;
     private Sensor stepCounter,stepDetector,accelerometer;
-    private boolean counterRegistered=false,detectorRegistered=false,accelRegistered=false,screenRegistered=false;
+    private boolean counterRegistered=false,detectorRegistered=false,accelRegistered=false;
     private String sessionDay="";
     private int counterSteps=0,detectorSteps=0,rhythmSteps=0,sessionPublished=0;
     private long lastNotification=0L;
@@ -37,14 +41,6 @@ public class StepService extends Service implements SensorEventListener {
     private long lastPeak=0L;
     private int candidateRun=0;
     private int lastInterval=0;
-    private final BroadcastReceiver screenState=new BroadcastReceiver(){
-        @Override public void onReceive(Context c,Intent intent){
-            if(Intent.ACTION_SCREEN_ON.equals(intent.getAction()))enableMotion(true);
-            if(Intent.ACTION_SCREEN_OFF.equals(intent.getAction()) && (counterRegistered||detectorRegistered))
-                enableMotion(false);
-        }
-    };
-
     @Override public void onCreate(){
         super.onCreate();
         manager=(SensorManager)getSystemService(SENSOR_SERVICE);
@@ -62,6 +58,11 @@ public class StepService extends Service implements SensorEventListener {
             android.util.Log.e("AdimPlus","Adım servisi başlatılamadı",ex);
             stopSelf();return START_NOT_STICKY;
         }
+        if(isRunning){
+            if(intent!=null && WALK_ON.equals(intent.getAction()))setWalkingSession(true);
+            else if(intent!=null && WALK_OFF.equals(intent.getAction()))setWalkingSession(false);
+            return START_STICKY;
+        }
         if(!isRunning){
             isRunning=true;
             sessionDay=StepStore.day(0);
@@ -74,22 +75,33 @@ public class StepService extends Service implements SensorEventListener {
                 counterRegistered=manager.registerListener(this,stepCounter,SensorManager.SENSOR_DELAY_NORMAL,0);
             if(stepDetector!=null)
                 detectorRegistered=manager.registerListener(this,stepDetector,SensorManager.SENSOR_DELAY_NORMAL,0);
-            PowerManager pm=(PowerManager)getSystemService(POWER_SERVICE);
-            if(pm==null||pm.isInteractive()||(!counterRegistered&&!detectorRegistered))enableMotion(true);
-            IntentFilter filter=new IntentFilter();
-            filter.addAction(Intent.ACTION_SCREEN_ON);
-            filter.addAction(Intent.ACTION_SCREEN_OFF);
-            try{registerReceiver(screenState,filter);screenRegistered=true;}catch(Exception e){android.util.Log.w("AdimPlus","Ekran durumu",e);}
-            isSensorReady=counterRegistered||detectorRegistered||accelRegistered;
-            sensorMode=counterRegistered&&detectorRegistered?"Adım sayacı + dedektör + yürüyüş doğrulama":
-                counterRegistered?"Adım sayacı + yürüyüş doğrulama":
-                detectorRegistered?"Adım dedektörü + yürüyüş doğrulama":
-                accelRegistered?"Ritmik yürüyüş doğrulama":"Kullanılabilir sensör yok";
+            // Varsayilan: SADECE fiziksel adim sensorleri. Telefonu oynatmak adim degildir.
+            // Ivmeolcer asla otomatik olarak sayim kaynagina kaydedilmez.
+            isWalkingMode=false;
+            isSensorReady=counterRegistered||detectorRegistered;
+            sensorMode=counterRegistered&&detectorRegistered?"Donanım sayacı + adım algılayıcı":
+                counterRegistered?"Donanım adım sayacı":
+                detectorRegistered?"Donanım adım algılayıcı":"Donanım adım sensörü yok";
+            if(intent!=null && WALK_ON.equals(intent.getAction()))setWalkingSession(true);
             notifyUi();
         }
         return START_STICKY;
     }
 
+    private void setWalkingSession(boolean enabled){
+        // Hizli ivmeolcer modu sadece kullanici acikca baslatinca kullanilir.
+        if(enabled && accelerometer==null){
+            lastSource="Bu telefonda hizli hareket sensoru yok";
+            return;
+        }
+        isWalkingMode=enabled;
+        enableMotion(enabled);
+        StepStore.prefs(this).edit().putBoolean("walking_session",enabled).apply();
+        isSensorReady=counterRegistered||detectorRegistered||accelRegistered;
+        sensorMode=enabled?"Canlı yürüyüş (isteğe bağlı)":"Donanım adım sayacı";
+        lastSource=enabled?"Yürüyüş başlatıldı":"Otomatik donanım sayımı";
+        notifyUi();
+    }
     private void enableMotion(boolean enable){
         if(manager==null||accelerometer==null)return;
         if(enable&&!accelRegistered){
@@ -119,6 +131,7 @@ public class StepService extends Service implements SensorEventListener {
             int increment=StepStore.ingestCounter(this,event.values[0]);
             if(increment>0){
                 counterSteps+=increment;
+                hardwareStepsReceived+=increment;
                 lastSource="Donanım adım sayacı";
                 lastEventMs=SystemClock.elapsedRealtime();
             }
@@ -126,10 +139,12 @@ public class StepService extends Service implements SensorEventListener {
             detectorEvents++;
             if(event.values[0]>0f){
                 detectorSteps++;
+                hardwareStepsReceived++;
                 lastSource="Donanım adım algılayıcı";
                 lastEventMs=SystemClock.elapsedRealtime();
             }
         }else if(type==Sensor.TYPE_ACCELEROMETER){
+            if(!isWalkingMode)return;
             detectRhythmicWalking(event.values);
         }else return;
         mergeSteps();
@@ -193,7 +208,7 @@ public class StepService extends Service implements SensorEventListener {
 
     private void mergeSteps(){
         // Dedektör, sayaç ve ritimden en yüksek ilerleme alınır; toplamları alınmaz.
-        int maximum=Math.max(counterSteps,Math.max(detectorSteps,rhythmSteps));
+        int maximum=isWalkingMode?Math.max(counterSteps,Math.max(detectorSteps,rhythmSteps)):Math.max(counterSteps,detectorSteps);
         int increment=maximum-sessionPublished;
         if(increment<=0)return;
         sessionPublished=maximum;
@@ -247,8 +262,9 @@ public class StepService extends Service implements SensorEventListener {
     @Override public void onDestroy(){
         notifyHandler.removeCallbacksAndMessages(null);
         if(manager!=null)manager.unregisterListener(this);
-        if(screenRegistered){try{unregisterReceiver(screenState);}catch(Exception ignored){}}
+        isWalkingMode=false;
         isRunning=false;isSensorReady=false;lastEventMs=0;
+        StepStore.prefs(this).edit().putBoolean("walking_session",false).apply();
         super.onDestroy();
     }
     @Override public IBinder onBind(Intent intent){return null;}
