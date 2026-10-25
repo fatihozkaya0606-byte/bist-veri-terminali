@@ -161,9 +161,9 @@ public final class NeonDashboard extends View {
         reset();p.setColor(0xFF3BF976);p.setShadowLayer(5,0,0,0xFF1AFF84);
         c.drawCircle(283,108,4.3f,p);p.clearShadowLayer();
         text(c,"♙",292,117,19,MINT,true);
-        text(c,"YÜRÜYÜŞ",314,105,9,MINT,true);
-        text(c,"TAKİBİ",314,116,9,MINT,true);
-        text(c,StepService.isSensorReady?"AKTİF":"BEKLEME",314,127,9,StepService.isSensorReady?MINT:0xFFFFC47A,true);
+        text(c,StepService.isWalkingMode?"HIZLI":"YÜRÜYÜŞ",314,105,9,MINT,true);
+        text(c,StepService.isWalkingMode?"YÜRÜYÜŞ":"TAKİBİ",314,116,9,MINT,true);
+        text(c,StepService.isWalkingMode?"DURDUR":StepService.isSensorReady?"AKTİF":"BEKLEME",314,127,9,StepService.isSensorReady?MINT:0xFFFFC47A,true);
     }
     private void badge(Canvas c,float x,float y,int type,String glyph){
         int[] highlights={0xFF127AEF,0xFFF26A33,0xFFFF3772,0xFF04A78C};
@@ -258,7 +258,7 @@ public final class NeonDashboard extends View {
         }else if(y>655){
             host.openTab(3);
         }else if(y>85&&y<135&&x>267){
-            host.beginTracking();
+            host.toggleWalkMode();
         }
         return true;
     }
