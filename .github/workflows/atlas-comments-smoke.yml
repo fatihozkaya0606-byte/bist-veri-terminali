@@ -1,0 +1,47 @@
+name: Piyasa Atlas comments beta smoke test
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  comments:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install Flask
+        run: python -m pip install flask
+      - name: Verify backend syntax and comments API
+        run: |
+          python -m py_compile app.py atlas_comments.py
+          python - <<'PY'
+          import os, tempfile
+          from flask import Flask
+          db = tempfile.NamedTemporaryFile(suffix='.sqlite3',delete=False)
+          db.close()
+          os.environ['ATLAS_COMMENTS_DB_PATH']=db.name
+          from atlas_comments import register_comments
+          app=Flask('atlas_test')
+          register_comments(app)
+          client=app.test_client()
+          empty=client.get('/api/atlas/comments?asset=doviz:USD')
+          assert empty.status_code==200,empty.data
+          assert empty.json['comments']==[],empty.json
+          payload={'asset':'doviz:USD','author':'Testci','body':'Piyasa yorumlari test amacli'}
+          post=client.post('/api/atlas/comments',json=payload)
+          assert post.status_code==201,post.data
+          read=client.get('/api/atlas/comments?asset=doviz:USD')
+          assert len(read.json['comments'])==1,read.json
+          comment_id=read.json['comments'][0]['id']
+          report=client.post('/api/atlas/comments/report',json={'id':comment_id,'reporter':'testreporter12345'})
+          assert report.status_code==200,report.data
+          blocked=client.post('/api/atlas/comments',json={'asset':'doviz:USD','author':'Spammer','body':'https://example.com'})
+          assert blocked.status_code==400,blocked.data
+          preflight=client.options('/api/atlas/comments')
+          assert preflight.status_code==200,preflight.data
+          assert preflight.headers.get('Access-Control-Allow-Origin')=='https://app.local'
+          print('PASS: list, create, report, spam URL rejection and CORS preflight')
+          PY
