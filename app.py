@@ -9,6 +9,8 @@ import random
 import string
 
 app = Flask(__name__)
+from atlas_comments import register_comments
+register_comments(app)
 APP_VERSION = "6.0-PRO"
 
 TV_URL = "https://scanner.tradingview.com/turkey/scan"
