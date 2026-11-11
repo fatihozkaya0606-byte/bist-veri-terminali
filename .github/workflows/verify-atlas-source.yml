@@ -1,0 +1,28 @@
+name: Verify Piyasa Atlas market API
+on:
+  push:
+    branches: [main]
+    paths: ['app.py', '.github/workflows/verify-atlas-source.yml']
+  workflow_dispatch:
+jobs:
+  python:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Compile backend Python without running market background jobs
+        run: python -m py_compile app.py atlas_comments.py
+      - name: Check that prices retain verified source metadata
+        run: |
+          python - <<'PY'
+          import ast
+          source=open("app.py",encoding="utf-8").read()
+          tree=ast.parse(source)
+          fn=next(x for x in tree.body if isinstance(x,ast.FunctionDef) and x.name=="fetch_fx_gold_full")
+          code=ast.get_source_segment(source,fn)
+          required=["source_time_ms","stale","Altinkaynak","Truncgil","GRA","CA","USD","EUR","_tr_num"]
+          assert all(key in code for key in required), "Missing quote timestamp or source fallback behavior"
+          print("Source freshness and per-symbol fallback checks passed")
+          PY
