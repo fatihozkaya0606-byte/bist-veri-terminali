@@ -1353,41 +1353,57 @@ def fetch_bist_full():
     return out
 
 
+# Prevent every phone refresh from triggering four external provider requests.
+# Cache expires after 8 seconds; each quote retains its own original source_time_ms.
+PIYASA_CACHE = {"payload": None, "until": 0.0}
+PIYASA_CACHE_LOCK = threading.RLock()
+
 @app.route("/api/piyasa")
 def api_piyasa():
     import time
 
-    result = {
-        "ok": True,
-        "updated": int(time.time()),
-        "doviz": [],
-        "altin": [],
-        "kripto": [],
-        "borsa": [],
-        "errors": {}
-    }
+    now = time.monotonic()
+    with PIYASA_CACHE_LOCK:
+        cached = PIYASA_CACHE["payload"]
+        if cached is not None and now < PIYASA_CACHE["until"]:
+            response = jsonify(cached)
+            response.headers["Access-Control-Allow-Origin"] = "*"
+            response.headers["Cache-Control"] = "no-store"
+            return response
 
-    try:
-        doviz, altin = fetch_fx_gold_full()
-        result["doviz"] = doviz
-        result["altin"] = altin
-    except Exception as e:
-        result["errors"]["doviz_altin"] = str(e)
+        result = {
+            "ok": True,
+            "updated": int(time.time()),
+            "doviz": [],
+            "altin": [],
+            "kripto": [],
+            "borsa": [],
+            "errors": {}
+        }
 
-    try:
-        result["kripto"] = fetch_crypto_full()
-    except Exception as e:
-        result["errors"]["kripto"] = str(e)
+        try:
+            doviz, altin = fetch_fx_gold_full()
+            result["doviz"] = doviz
+            result["altin"] = altin
+        except Exception as e:
+            result["errors"]["doviz_altin"] = str(e)
 
-    try:
-        result["borsa"] = fetch_bist_full()
-    except Exception as e:
-        result["errors"]["borsa"] = str(e)
+        try:
+            result["kripto"] = fetch_crypto_full()
+        except Exception as e:
+            result["errors"]["kripto"] = str(e)
 
-    resp = jsonify(result)
-    resp.headers["Access-Control-Allow-Origin"] = "*"
-    resp.headers["Cache-Control"] = "no-store"
-    return resp
+        try:
+            result["borsa"] = fetch_bist_full()
+        except Exception as e:
+            result["errors"]["borsa"] = str(e)
+
+        PIYASA_CACHE["payload"] = result
+        PIYASA_CACHE["until"] = time.monotonic() + 8
+        resp = jsonify(result)
+        resp.headers["Access-Control-Allow-Origin"] = "*"
+        resp.headers["Cache-Control"] = "no-store"
+        return resp
 
 
 HTML = r'''
