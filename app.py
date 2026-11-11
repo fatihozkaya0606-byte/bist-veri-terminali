@@ -1108,90 +1108,155 @@ def _tr_num(v):
 
 
 def fetch_fx_gold_full():
+    """Merge independently timestamped public FX/dealer quotes, not fabricated live ticks.
+
+    Source priority: Altinkaynak official public JSON first; fresh Truncgil v4
+    for individual missing/stale symbols; Truncgil v3 only as last resort.
+    The underlying providers' commercial redistribution rights must be checked
+    before deploying this API as a licensed BIST/FX distribution product.
+    """
+    import datetime
+    import math
+    from zoneinfo import ZoneInfo
     import requests
 
-    r=requests.get(
-        "https://finans.truncgil.com/v3/today.json",
-        timeout=15,
-        headers={"User-Agent":"Mozilla/5.0"}
-    )
-    r.raise_for_status()
-    j=r.json()
-
-    doviz=[]
-    altin=[]
-
-    fx_symbols={
-        "USD":"USD","EUR":"EUR","GBP":"GBP","CHF":"CHF",
-        "CAD":"CAD","AUD":"AUD","RUB":"RUB","AED":"AED",
-        "DKK":"DKK","SEK":"SEK","NOK":"NOK","JPY":"JPY"
+    ist = ZoneInfo("Europe/Istanbul")
+    now_ms = int(time.time() * 1000)
+    quotes = {}
+    names = {
+        "GRA": "Gram Altın", "GA": "Has Altın", "Ç": "Çeyrek Altın",
+        "Y": "Yarım Altın", "TA": "Tam Altın",
+        "CA": "Ata Cumhuriyet Altını", "22A": "22 Ayar Bilezik",
+        "ONS": "Ons Altın", "XAG": "Gram Gümüş"
     }
 
-    gold_symbols={
-        "gram-has-altin":"GA",
-        "ceyrek-altin":"Ç",
-        "yarim-altin":"Y",
-        "tam-altin":"TA",
-        "cumhuriyet-altini":"CA",
-        "ata-altin":"ATA",
-        "14-ayar-altin":"14A",
-        "18-ayar-altin":"18A",
-        "22-ayar-bilezik":"22A",
-        "ikibucuk-altin":"2.5",
-        "besli-altin":"5L",
-        "gremse-altin":"GR",
-        "resat-altin":"RŞ",
-        "hamit-altin":"HM",
-        "gumus":"XAG",
-        "gram-platin":"XPT",
-        "gram-paladyum":"XPD"
-    }
+    def source_stamp(value):
+        if isinstance(value, (int, float)):
+            return int(value * (1000 if value < 100_000_000_000 else 1))
+        value = str(value or "").strip()
+        if not value:
+            return 0
+        try:
+            if "T" in value:
+                parsed = datetime.datetime.fromisoformat(value.replace("Z", "+00:00"))
+                if parsed.tzinfo is None:
+                    parsed = parsed.replace(tzinfo=ist)
+                return int(parsed.timestamp() * 1000)
+            fmt = "%d.%m.%Y %H:%M:%S" if "." in value[:10] else "%Y-%m-%d %H:%M:%S"
+            parsed = datetime.datetime.strptime(value, fmt).replace(tzinfo=ist)
+            return int(parsed.timestamp() * 1000)
+        except (ValueError, OverflowError):
+            return 0
 
-    def val(x,*names):
-        for n in names:
-            if n in x and x[n] not in (None,""):
-                return _tr_num(x[n])
-        return None
+    def push(kind, symbol, buy, sell, change, source, millis, name=None):
+        sale = _tr_num(sell)
+        if sale is None or not math.isfinite(sale) or sale <= 0:
+            return
+        age = now_ms - millis
+        if millis <= 0 or age < -120_000 or age > 24 * 3600 * 1000:
+            return
+        stale = age > 180_000
+        previous = quotes.get((kind, symbol))
+        if previous:
+            # Keep the preferred provider while it is genuinely fresh.
+            if not previous["stale"]:
+                return
+            if previous["source_time_ms"] >= millis:
+                return
+        bid = _tr_num(buy)
+        change_num = _tr_num(change)
+        quotes[(kind, symbol)] = {
+            "symbol": symbol,
+            "name": name or names.get(symbol, symbol + ("/TRY" if kind == "doviz" else "")),
+            "buy": bid if bid is not None and math.isfinite(bid) and bid > 0 else sale,
+            "sell": sale,
+            "change_pct": change_num if change_num is not None and math.isfinite(change_num) else None,
+            "source": source,
+            "source_time_ms": millis,
+            "stale": stale
+        }
 
-    for key,x in j.items():
-        if not isinstance(x,dict):
-            continue
+    def from_altinkaynak(endpoint, mappings):
+        response = requests.get(endpoint, timeout=5, headers={
+            "User-Agent": "Mozilla/5.0 (PiyasaAtlas/12.9)",
+            "Accept": "application/json", "Cache-Control": "no-cache"
+        })
+        response.raise_for_status()
+        records = response.json()
+        if not isinstance(records, list):
+            raise ValueError("Unexpected Altinkaynak response")
+        by_code = {str(x.get("Kod", "")).upper(): x for x in records if isinstance(x, dict)}
+        for code, kind, symbol in mappings:
+            row = by_code.get(code.upper())
+            if not row:
+                continue
+            stamp = source_stamp(row.get("GuncellenmeZamani"))
+            push(kind, symbol, row.get("Alis"), row.get("Satis"), None,
+                 "Altinkaynak", stamp)
 
-        lk=str(key).lower()
+    for endpoint, codes in [
+        ("https://static.altinkaynak.com/public/Currency", [
+            ("USD", "doviz", "USD"), ("EUR", "doviz", "EUR"),
+            ("GBP", "doviz", "GBP"), ("CHF", "doviz", "CHF")]),
+        ("https://static.altinkaynak.com/public/Gold", [
+            ("GA", "altin", "GRA"), ("HH_T", "altin", "GA"),
+            ("C", "altin", "Ç"), ("Y", "altin", "Y"),
+            ("PA", "altin", "CA"), ("PB", "altin", "22A"),
+            ("AG_T", "altin", "XAG"), ("XAUUSD", "altin", "ONS")])
+    ]:
+        try:
+            from_altinkaynak(endpoint, codes)
+        except (requests.RequestException, ValueError, TypeError) as error:
+            app.logger.warning("FX source unavailable: %s", type(error).__name__)
 
-        buy=val(x,"Buying","buying","Alış","alis")
-        sell=val(x,"Selling","selling","Satış","satis")
-        chg=val(
-            x,
-            "Change","change",
-            "ChangePercent","changePercent",
-            "ChangeRate","changeRate",
-            "Rate","rate",
-            "Değişim","degisim"
-        )
+    tr_v4_fx = {"USD": "USD", "EUR": "EUR", "GBP": "GBP", "CHF": "CHF"}
+    tr_v4_gold = {"GRA": "GRA", "HAS": "GA", "CEYREKALTIN": "Ç",
+                  "YARIMALTIN": "Y", "TAMALTIN": "TA",
+                  "CUMHURIYETALTINI": "CA", "YIA": "22A", "GUMUS": "XAG"}
+    tr_v3_fx = {"USD": "USD", "EUR": "EUR", "GBP": "GBP", "CHF": "CHF",
+                "CAD": "CAD", "AUD": "AUD", "RUB": "RUB", "AED": "AED",
+                "DKK": "DKK", "SEK": "SEK", "NOK": "NOK", "JPY": "JPY"}
+    tr_v3_gold = {"gram-altin": "GRA", "gram-has-altin": "GA",
+                  "ceyrek-altin": "Ç", "yarim-altin": "Y",
+                  "tam-altin": "TA", "cumhuriyet-altini": "CA",
+                  "22-ayar-bilezik": "22A", "gumus": "XAG",
+                  "ata-altin": "ATA", "14-ayar-altin": "14A",
+                  "18-ayar-altin": "18A", "gram-platin": "XPT",
+                  "gram-paladyum": "XPD"}
 
-        if key in fx_symbols:
-            doviz.append({
-                "symbol":fx_symbols[key],
-                "name":x.get("Name") or key,
-                "buy":buy,
-                "sell":sell,
-                "change_pct":chg
-            })
-            continue
+    for version, fx, gold in [
+        ("v4", tr_v4_fx, tr_v4_gold),
+        ("v3", tr_v3_fx, tr_v3_gold)
+    ]:
+        # Truncgil may serve a new HTTP response with unchanged prices:
+        # its original Update_Date is kept and its data is never time-stamped now.
+        try:
+            response = requests.get("https://finans.truncgil.com/" + version + "/today.json",
+                                    timeout=5,
+                                    headers={"User-Agent": "Mozilla/5.0 (PiyasaAtlas/12.9)"})
+            response.raise_for_status()
+            payload = response.json()
+            stamp = source_stamp(payload.get("Update_Date"))
+            if stamp <= 0:
+                continue
+            for code, symbol in fx.items():
+                value = payload.get(code)
+                if isinstance(value, dict):
+                    push("doviz", symbol, value.get("Buying", value.get("Alış")),
+                         value.get("Selling", value.get("Satış")),
+                         value.get("Change"), "Truncgil " + version, stamp)
+            for code, symbol in gold.items():
+                value = payload.get(code)
+                if isinstance(value, dict):
+                    push("altin", symbol, value.get("Buying", value.get("Alış")),
+                         value.get("Selling", value.get("Satış")),
+                         value.get("Change"), "Truncgil " + version, stamp)
+        except (requests.RequestException, ValueError, TypeError) as error:
+            app.logger.warning("Secondary FX provider unavailable: %s", type(error).__name__)
 
-        for gkey,sym in gold_symbols.items():
-            if lk == gkey:
-                altin.append({
-                    "symbol":sym,
-                    "name":x.get("Name") or key.replace("-"," ").upper(),
-                    "buy":buy,
-                    "sell":sell,
-                    "change_pct":chg
-                })
-                break
-
-    return doviz,altin
+    doviz = [value for (kind, _), value in quotes.items() if kind == "doviz"]
+    altin = [value for (kind, _), value in quotes.items() if kind == "altin"]
+    return doviz, altin
 
 
 def fetch_crypto_full():
